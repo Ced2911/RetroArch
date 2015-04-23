@@ -41,7 +41,7 @@ if [ "$HAVE_VIDEOCORE" = 'yes' ]; then
    [ -d /opt/vc/include/interface/vcos/pthreads ] && add_include_dirs /opt/vc/include/interface/vcos/pthreads
    [ -d /opt/vc/include/interface/vmcs_host/linux ] && add_include_dirs /opt/vc/include/interface/vmcs_host/linux
    HAVE_GLES='auto'
-   EXTRA_GL_LIBS="-lEGL -lGLESv2 -lbcm_host -lvcos -lvchiq_arm"
+   EXTRA_GL_LIBS="-lEGL -lGLESv2 -lbcm_host -lvcos -lvchiq_arm -lvchostif"
 fi
 
 if [ "$HAVE_NEON" = "yes" ]; then
@@ -111,7 +111,7 @@ if [ "$HAVE_EXYNOS" != "no" ]; then
 fi
 
 if [ "$HAVE_DISPMANX" != "no" ]; then
-   DISPMANX_LIBS="-L/opt/vc/lib -lbcm_host -lvcos -lvchiq_arm"
+   DISPMANX_LIBS="-L/opt/vc/lib -lbcm_host -lvcos -lvchiq_arm -lvchostif"
    DISPMANX_INCLUDES="-I/opt/vc/include -I/opt/vc/include/interface/vmcs_host/linux/ -I/opt/vc/include/interface/vcos/pthreads"
    PKG_CONF_USED="$PKG_CONF_USED DISPMANX"
 fi
