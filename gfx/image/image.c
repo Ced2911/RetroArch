@@ -18,6 +18,7 @@
 #include "../../config.h"
 #endif
 
+#include "../../general.h"
 #include <formats/image.h>
 #ifdef HAVE_RPNG
 #include <formats/rpng.h>
