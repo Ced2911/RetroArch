@@ -14,26 +14,26 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../../driver.h"
-#include <stdint.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stddef.h>
-#include <compat/msvc.h>
-#include <boolean.h>
 #include <stdlib.h>
+#include <boolean.h>
+
+#include <compat/msvc.h>
+#include <retro_miscellaneous.h>
+
 #include "xaudio.h"
-#include "../../general.h"
+
+#include "../audio_driver.h"
+#include "../../configuration.h"
+#include "../../verbosity.h"
 
 typedef struct xaudio2 xaudio2_t;
 
 #define MAX_BUFFERS      16
 
 #define MAX_BUFFERS_MASK (MAX_BUFFERS - 1)
-
-#undef min
-#undef max
-#define min(a, b) ((a) < (b) ? (a) : (b))
-#define max(a, b) ((a) > (b) ? (a) : (b))
 
 typedef struct
 {
@@ -56,7 +56,7 @@ struct xaudio2 : public IXAudio2VoiceCallback
    STDMETHOD_(void, OnBufferStart) (void *) {}
    STDMETHOD_(void, OnBufferEnd) (void *) 
    {
-      InterlockedDecrement(&buffers);
+      InterlockedDecrement((LONG volatile*)&buffers);
       SetEvent(hEvent);
    }
    STDMETHOD_(void, OnLoopEnd) (void *) {}
@@ -71,12 +71,13 @@ struct xaudio2 : public IXAudio2VoiceCallback
    IXAudio2SourceVoice *pSourceVoice;
    HANDLE hEvent;
 
-   volatile long buffers;
+   unsigned long volatile buffers;
    unsigned bufsize;
    unsigned bufptr;
    unsigned write_buffer;
 };
 
+#if 0
 static void xaudio2_enumerate_devices(xaudio2_t *xa)
 {
    uint32_t dev_count = 0;
@@ -97,6 +98,7 @@ static void xaudio2_enumerate_devices(xaudio2_t *xa)
    }
 #endif
 }
+#endif
 
 static void xaudio2_set_wavefmt(WAVEFORMATEX *wfx,
       unsigned channels, unsigned samplerate)
@@ -214,7 +216,7 @@ static size_t xaudio2_write(xaudio2_t *handle, const void *buf, size_t bytes_)
          if (FAILED(handle->pSourceVoice->SubmitSourceBuffer(&xa2buffer, NULL)))
             return 0;
 
-         InterlockedIncrement(&handle->buffers);
+         InterlockedIncrement((LONG volatile*)&handle->buffers);
          handle->bufptr       = 0;
          handle->write_buffer = (handle->write_buffer + 1) & MAX_BUFFERS_MASK;
       }
@@ -226,16 +228,13 @@ static size_t xaudio2_write(xaudio2_t *handle, const void *buf, size_t bytes_)
 static void *xa_init(const char *device, unsigned rate, unsigned latency)
 {
    size_t bufsize;
-   xa_t *xa = NULL;
    unsigned device_index = 0;
-   global_t *global = global_get_ptr();
+   xa_t *xa = (xa_t*)calloc(1, sizeof(*xa));
+   if (!xa)
+      return NULL;
 
    if (latency < 8)
       latency = 8; /* Do not allow shenanigans. */
-
-   xa = (xa_t*)calloc(1, sizeof(*xa));
-   if (!xa)
-      return NULL;
 
    bufsize = latency * rate / 1000;
 
@@ -254,9 +253,6 @@ static void *xa_init(const char *device, unsigned rate, unsigned latency)
       free(xa);
       return NULL;
    }
-
-   if (global->verbosity)
-      xaudio2_enumerate_devices(xa->xa);
 
    return xa;
 }

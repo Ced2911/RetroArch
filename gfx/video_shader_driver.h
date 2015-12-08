@@ -18,36 +18,44 @@
 
 #include <boolean.h>
 
+#include <gfx/math/matrix_4x4.h>
+
 #ifdef HAVE_CONFIG_H
 #include "../config.h"
 #endif
 
 #include "video_context_driver.h"
-#include <gfx/math/matrix_4x4.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct shader_backend
 {
-   bool (*init)(void *data, const char *path);
-   void (*deinit)(void);
-   void (*set_params)(void *data, unsigned width, unsigned height, 
+   void *(*init)(void *data, const char *path);
+   void (*deinit)(void *data);
+   void (*set_params)(void *data, void *shader_data,
+         unsigned width, unsigned height, 
          unsigned tex_width, unsigned tex_height, 
          unsigned out_width, unsigned out_height,
          unsigned frame_counter,
          const void *info, 
          const void *prev_info,
+         const void *feedback_info,
          const void *fbo_info, unsigned fbo_info_cnt);
 
-   void (*use)(void *data, unsigned index);
-   unsigned (*num_shaders)(void);
-   bool (*filter_type)(unsigned index, bool *smooth);
-   enum gfx_wrap_type (*wrap_type)(unsigned index);
-   void (*shader_scale)(unsigned index, struct gfx_fbo_scale *scale);
-   bool (*set_coords)(const void *data);
-   bool (*set_mvp)(void *data, const math_matrix_4x4 *mat);
-   unsigned (*get_prev_textures)(void);
-   bool (*mipmap_input)(unsigned index);
+   void (*use)(void *data, void *shader_data, unsigned index);
+   unsigned (*num_shaders)(void *data);
+   bool (*filter_type)(void *data, unsigned index, bool *smooth);
+   enum gfx_wrap_type (*wrap_type)(void *data, unsigned index);
+   void (*shader_scale)(void *data, unsigned index, struct gfx_fbo_scale *scale);
+   bool (*set_coords)(void *handle_data, void *shader_data, const void *data);
+   bool (*set_mvp)(void *data, void *shader_data, const math_matrix_4x4 *mat);
+   unsigned (*get_prev_textures)(void *data);
+   bool (*get_feedback_pass)(void *data, unsigned *pass);
+   bool (*mipmap_input)(void *data, unsigned index);
 
-   struct video_shader *(*get_current_shader)(void);
+   struct video_shader *(*get_current_shader)(void *data);
 
    enum rarch_shader_type type;
 
@@ -84,6 +92,9 @@ extern const shader_backend_t shader_null_backend;
 
 #endif
 
+void video_shader_scale(unsigned idx,
+      const shader_backend_t *shader,  struct gfx_fbo_scale *scale);
+
 /**
  * shader_ctx_find_driver:
  * @ident                   : Identifier of shader context driver to find.
@@ -104,5 +115,45 @@ const shader_backend_t *shader_ctx_find_driver(const char *ident);
 const shader_backend_t *shader_ctx_init_first(void);
 
 struct video_shader *video_shader_driver_get_current_shader(void);
+
+bool video_shader_driver_init(const shader_backend_t *shader, void *data, const char *path);
+
+void video_shader_driver_deinit(const shader_backend_t *shader);
+
+void video_shader_driver_use(const shader_backend_t *shader, void *data, unsigned index);
+
+const char *video_shader_driver_get_ident(const shader_backend_t *shader);
+
+bool video_shader_driver_mipmap_input(const shader_backend_t *shader, unsigned index);
+
+unsigned video_shader_driver_num_shaders(const shader_backend_t *shader);
+
+bool video_shader_driver_set_coords(const shader_backend_t *shader, void *handle_data, const void *data);
+
+bool video_shader_driver_set_mvp(const shader_backend_t *shader, void *data, const math_matrix_4x4 *mat);
+
+unsigned video_shader_driver_get_prev_textures(const shader_backend_t *shader);
+
+bool video_shader_driver_filter_type(const shader_backend_t *shader, unsigned index, bool *smooth);
+
+enum gfx_wrap_type video_shader_driver_wrap_type(const shader_backend_t *shader, unsigned index);
+
+bool video_shader_driver_get_feedback_pass(const shader_backend_t *shader, unsigned *pass);
+
+struct video_shader *video_shader_driver_direct_get_current_shader(const shader_backend_t *shader);
+
+void video_shader_driver_set_params(const shader_backend_t *shader, 
+      void *data, unsigned width, unsigned height, 
+      unsigned tex_width, unsigned tex_height, 
+      unsigned out_width, unsigned out_height,
+      unsigned frame_counter,
+      const void *info, 
+      const void *prev_info,
+      const void *feedback_info,
+      const void *fbo_info, unsigned fbo_info_cnt);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

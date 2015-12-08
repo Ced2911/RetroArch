@@ -15,21 +15,22 @@
  */
 
 #include <string.h>
+
 #include <file/file_path.h>
+
 #include "record_driver.h"
 
-#include "../driver.h"
-#include "../dynamic.h"
+#include "../command_event.h"
 #include "../general.h"
-#include "../retroarch.h"
-#include "../runloop.h"
-#include "../intl/intl.h"
-#include "../gfx/video_driver.h"
-#include "../gfx/video_viewport.h"
+#include "../verbosity.h"
+#include "../msg_hash.h"
+#include "../string_list_special.h"
 
 #ifdef HAVE_CONFIG_H
 #include "../config.h"
 #endif
+
+static bool recording_enable;
 
 static const record_driver_t *record_drivers[] = {
 #ifdef HAVE_FFMPEG
@@ -38,6 +39,9 @@ static const record_driver_t *record_drivers[] = {
    &ffemu_null,
    NULL,
 };
+
+static const record_driver_t *recording_driver;
+static void *recording_data;
 
 /**
  * record_driver_find_ident:
@@ -78,64 +82,31 @@ const void *record_driver_find_handle(int idx)
  **/
 const char* config_get_record_driver_options(void)
 {
-   union string_list_elem_attr attr;
-   unsigned i;
-   char *options = NULL;
-   int options_len = 0;
-   struct string_list *options_l = string_list_new();
-
-   attr.i = 0;
-
-   if (!options_l)
-      return NULL;
-
-   for (i = 0; record_driver_find_handle(i); i++)
-   {
-      const char *opt = record_driver_find_ident(i);
-      options_len += strlen(opt) + 1;
-      string_list_append(options_l, opt, attr);
-   }
-
-   options = (char*)calloc(options_len, sizeof(char));
-
-   if (!options)
-   {
-      string_list_free(options_l);
-      options_l = NULL;
-      return NULL;
-   }
-
-   string_list_join_concat(options, options_len, options_l, "|");
-
-   string_list_free(options_l);
-   options_l = NULL;
-
-   return options;
+   return char_list_new_special(STRING_LIST_RECORD_DRIVERS, NULL);
 }
 
 void find_record_driver(void)
 {
-   driver_t *driver     = driver_get_ptr();
    settings_t *settings = config_get_ptr();
-
-   int i = find_driver_index("record_driver", settings->record.driver);
+   int                i = find_driver_index("record_driver", settings->record.driver);
 
    if (i >= 0)
-      driver->recording = (const record_driver_t*)audio_driver_find_handle(i);
+      recording_driver = (const record_driver_t*)record_driver_find_handle(i);
    else
    {
       unsigned d;
-      RARCH_ERR("Couldn't find any audio driver named \"%s\"\n",
+
+      RARCH_ERR("Couldn't find any record driver named \"%s\"\n",
             settings->audio.driver);
-      RARCH_LOG_OUTPUT("Available audio drivers are:\n");
-      for (d = 0; audio_driver_find_handle(d); d++)
+      RARCH_LOG_OUTPUT("Available record drivers are:\n");
+      for (d = 0; record_driver_find_handle(d); d++)
          RARCH_LOG_OUTPUT("\t%s\n", record_driver_find_ident(d));
-      RARCH_WARN("Going to default to first audio driver...\n");
+      RARCH_WARN("Going to default to first record driver...\n");
 
-      driver->audio = (const audio_driver_t*)audio_driver_find_handle(0);
+      recording_driver = (const record_driver_t*)record_driver_find_handle(0);
 
-      if (!driver->audio)
-         rarch_fail(1, "find_audio_driver()");
+      if (!recording_driver)
+         retro_fail(1, "find_record_driver()");
    }
 }
 
@@ -196,10 +167,9 @@ void recording_dump_frame(const void *data, unsigned width,
       unsigned height, size_t pitch)
 {
    struct ffemu_video_data ffemu_data = {0};
-   driver_t *driver = driver_get_ptr();
    global_t *global = global_get_ptr();
 
-   if (!driver->recording_data)
+   if (!recording_data)
       return;
 
    ffemu_data.pitch   = pitch;
@@ -207,15 +177,17 @@ void recording_dump_frame(const void *data, unsigned width,
    ffemu_data.height  = height;
    ffemu_data.data    = data;
 
-   if (global->record.gpu_buffer)
+   if (video_driver_ctl(RARCH_DISPLAY_CTL_HAS_GPU_RECORD, NULL))
    {
+      uint8_t *gpu_buf         = NULL;
       struct video_viewport vp = {0};
 
       video_driver_viewport_info(&vp);
 
       if (!vp.width || !vp.height)
       {
-         RARCH_WARN("Viewport size calculation failed! Will continue using raw data. This will probably not work right ...\n");
+         RARCH_WARN("%s \n",
+               msg_hash_to_str(MSG_VIEWPORT_SIZE_CALCULATION_FAILED));
          event_command(EVENT_CMD_GPU_RECORD_DEINIT);
 
          recording_dump_frame(data, width, height, pitch);
@@ -226,55 +198,78 @@ void recording_dump_frame(const void *data, unsigned width,
       if (vp.width != global->record.gpu_width ||
             vp.height != global->record.gpu_height)
       {
-         static const char msg[] = "Recording terminated due to resize.";
-         RARCH_WARN("%s\n", msg);
+         RARCH_WARN("%s\n", msg_hash_to_str(MSG_RECORDING_TERMINATED_DUE_TO_RESIZE));
 
-         rarch_main_msg_queue_push(msg, 1, 180, true);
+         runloop_msg_queue_push_new(MSG_RECORDING_TERMINATED_DUE_TO_RESIZE, 1, 180, true);
          event_command(EVENT_CMD_RECORD_DEINIT);
          return;
       }
 
+      if (!video_driver_ctl(RARCH_DISPLAY_CTL_GPU_RECORD_GET, &gpu_buf))
+         return;
+
       /* Big bottleneck.
        * Since we might need to do read-backs asynchronously,
        * it might take 3-4 times before this returns true. */
-      if (!video_driver_read_viewport(global->record.gpu_buffer))
+      if (!video_driver_ctl(RARCH_DISPLAY_CTL_READ_VIEWPORT, gpu_buf))
             return;
 
       ffemu_data.pitch  = global->record.gpu_width * 3;
       ffemu_data.width  = global->record.gpu_width;
       ffemu_data.height = global->record.gpu_height;
-      ffemu_data.data   = global->record.gpu_buffer +
-         (ffemu_data.height - 1) * ffemu_data.pitch;
+      ffemu_data.data   = gpu_buf + (ffemu_data.height - 1) * ffemu_data.pitch;
 
       ffemu_data.pitch  = -ffemu_data.pitch;
    }
 
-   if (!global->record.gpu_buffer)
+   if (!video_driver_ctl(RARCH_DISPLAY_CTL_HAS_GPU_RECORD, NULL))
       ffemu_data.is_dupe = !data;
 
-   if (driver->recording && driver->recording->push_video)
-      driver->recording->push_video(driver->recording_data, &ffemu_data);
+   if (recording_driver && recording_driver->push_video)
+      recording_driver->push_video(recording_data, &ffemu_data);
 }
 
 bool recording_deinit(void)
 {
-   driver_t *driver = driver_get_ptr();
-
-   if (!driver->recording_data || !driver->recording)
+   if (!recording_data || !recording_driver)
       return false;
 
-   if (driver->recording->finalize)
-      driver->recording->finalize(driver->recording_data);
+   if (recording_driver->finalize)
+      recording_driver->finalize(recording_data);
 
-   if (driver->recording->free)
-      driver->recording->free(driver->recording_data);
+   if (recording_driver->free)
+      recording_driver->free(recording_data);
 
-   driver->recording_data = NULL;
-   driver->recording      = NULL;
+   recording_data            = NULL;
+   recording_driver          = NULL;
 
    event_command(EVENT_CMD_GPU_RECORD_DEINIT);
 
    return true;
+}
+
+bool *recording_is_enabled(void)
+{
+   return &recording_enable;
+}
+
+void recording_set_state(bool state)
+{
+   recording_enable = state;
+}
+
+void recording_push_audio(const int16_t *data, size_t samples)
+{
+   struct ffemu_audio_data ffemu_data;
+
+   if (!recording_data)
+      return;
+
+   ffemu_data.data                    = data;
+   ffemu_data.frames                  = samples / 2;
+
+   if (recording_driver && recording_driver->push_audio)
+      recording_driver->push_audio(recording_data, &ffemu_data);
 }
 
 /**
@@ -286,32 +281,34 @@ bool recording_deinit(void)
  **/
 bool recording_init(void)
 {
-   char recording_file[PATH_MAX_LENGTH];
-   struct ffemu_params params = {0};
-   global_t *global = global_get_ptr();
-   driver_t *driver     = driver_get_ptr();
-   settings_t *settings = config_get_ptr();
-   const struct retro_system_av_info *info = &global->system.av_info;
+   char recording_file[PATH_MAX_LENGTH] = {0};
+   struct ffemu_params params           = {0};
+   global_t *global                     = global_get_ptr();
+   settings_t *settings                 = config_get_ptr();
+   struct retro_system_av_info *av_info = video_viewport_get_system_av_info();
+   const struct retro_hw_render_callback *hw_render = 
+      (const struct retro_hw_render_callback*)video_driver_callback();
+   bool *recording_enabled              = recording_is_enabled();
 
-   if (!global->record.enable)
+   if (!*recording_enabled)
       return false;
 
-   if (global->libretro_dummy)
+   if (global->inited.core.type == CORE_TYPE_DUMMY)
    {
-      RARCH_WARN(RETRO_LOG_INIT_RECORDING_SKIPPED);
+      RARCH_WARN("%s\n", msg_hash_to_str(MSG_USING_LIBRETRO_DUMMY_CORE_RECORDING_SKIPPED));
       return false;
    }
 
-   if (!settings->video.gpu_record
-         && global->system.hw_render_callback.context_type)
+   if (!settings->video.gpu_record && hw_render->context_type)
    {
-      RARCH_WARN("Libretro core is hardware rendered. Must use post-shaded recording as well.\n");
+      RARCH_WARN("%s.\n", msg_hash_to_str(MSG_HW_RENDERED_MUST_USE_POSTSHADED_RECORDING));
       return false;
    }
 
-   RARCH_LOG("Custom timing given: FPS: %.4f, Sample rate: %.4f\n",
-         (float)global->system.av_info.timing.fps,
-         (float)global->system.av_info.timing.sample_rate);
+   RARCH_LOG("%s: FPS: %.4f, Sample rate: %.4f\n",
+         msg_hash_to_str(MSG_CUSTOM_TIMING_GIVEN),
+         (float)av_info->timing.fps,
+         (float)av_info->timing.sample_rate);
 
    strlcpy(recording_file, global->record.path, sizeof(recording_file));
 
@@ -320,23 +317,24 @@ bool recording_init(void)
             global->record.output_dir,
             global->record.path, sizeof(recording_file));
 
-   params.out_width  = info->geometry.base_width;
-   params.out_height = info->geometry.base_height;
-   params.fb_width   = info->geometry.max_width;
-   params.fb_height  = info->geometry.max_height;
+   params.out_width  = av_info->geometry.base_width;
+   params.out_height = av_info->geometry.base_height;
+   params.fb_width   = av_info->geometry.max_width;
+   params.fb_height  = av_info->geometry.max_height;
    params.channels   = 2;
    params.filename   = recording_file;
-   params.fps        = global->system.av_info.timing.fps;
-   params.samplerate = global->system.av_info.timing.sample_rate;
-   params.pix_fmt    = (global->system.pix_fmt == RETRO_PIXEL_FORMAT_XRGB8888) ?
+   params.fps        = av_info->timing.fps;
+   params.samplerate = av_info->timing.sample_rate;
+   params.pix_fmt    = (video_driver_get_pixel_format() == RETRO_PIXEL_FORMAT_XRGB8888) ?
       FFEMU_PIX_ARGB8888 : FFEMU_PIX_RGB565;
    params.config     = NULL;
    
    if (*global->record.config)
       params.config = global->record.config;
 
-   if (settings->video.gpu_record && driver->video->read_viewport)
+   if (video_driver_ctl(RARCH_DISPLAY_CTL_SUPPORTS_RECORDING, NULL))
    {
+      unsigned gpu_size;
       struct video_viewport vp = {0};
 
       video_driver_viewport_info(&vp);
@@ -354,8 +352,8 @@ bool recording_init(void)
       params.fb_height  = next_pow2(vp.height);
 
       if (settings->video.force_aspect &&
-            (global->system.aspect_ratio > 0.0f))
-         params.aspect_ratio  = global->system.aspect_ratio;
+            (video_driver_get_aspect_ratio() > 0.0f))
+         params.aspect_ratio  = video_driver_get_aspect_ratio();
       else
          params.aspect_ratio  = (float)vp.width / vp.height;
 
@@ -363,15 +361,12 @@ bool recording_init(void)
       global->record.gpu_width   = vp.width;
       global->record.gpu_height  = vp.height;
 
-      RARCH_LOG("Detected viewport of %u x %u\n",
+      RARCH_LOG("%s %u x %u\n", msg_hash_to_str(MSG_DETECTED_VIEWPORT_OF),
             vp.width, vp.height);
 
-      global->record.gpu_buffer = (uint8_t*)malloc(vp.width * vp.height * 3);
-      if (!global->record.gpu_buffer)
-      {
-         RARCH_ERR("Failed to allocate GPU record buffer.\n");
+      gpu_size = vp.width * vp.height * 3;
+      if (!video_driver_ctl(RARCH_DISPLAY_CTL_GPU_RECORD_INIT, &gpu_size))
          return false;
-      }
    }
    else
    {
@@ -382,41 +377,58 @@ bool recording_init(void)
       }
 
       if (settings->video.force_aspect &&
-            (global->system.aspect_ratio > 0.0f))
-         params.aspect_ratio = global->system.aspect_ratio;
+            (video_driver_get_aspect_ratio() > 0.0f))
+         params.aspect_ratio = video_driver_get_aspect_ratio();
       else
          params.aspect_ratio = (float)params.out_width / params.out_height;
 
-      if (settings->video.post_filter_record && global->filter.filter)
+      if (settings->video.post_filter_record && video_driver_ctl(RARCH_DISPLAY_CTL_FRAME_FILTER_ALIVE, NULL))
       {
          unsigned max_width  = 0;
          unsigned max_height = 0;
+         
+         params.pix_fmt    = FFEMU_PIX_RGB565;
 
-         if (global->filter.out_rgb32)
+         if (video_driver_ctl(RARCH_DISPLAY_CTL_FRAME_FILTER_IS_32BIT, NULL))
             params.pix_fmt = FFEMU_PIX_ARGB8888;
-         else
-            params.pix_fmt =  FFEMU_PIX_RGB565;
 
-         rarch_softfilter_get_max_output_size(global->filter.filter,
+         rarch_softfilter_get_max_output_size(
+               video_driver_frame_filter_get_ptr(),
                &max_width, &max_height);
          params.fb_width  = next_pow2(max_width);
          params.fb_height = next_pow2(max_height);
       }
    }
 
-   RARCH_LOG("Recording to %s @ %ux%u. (FB size: %ux%u pix_fmt: %u)\n",
+   RARCH_LOG("%s %s @ %ux%u. (FB size: %ux%u pix_fmt: %u)\n",
+         msg_hash_to_str(MSG_RECORDING_TO),
          global->record.path,
          params.out_width, params.out_height,
          params.fb_width, params.fb_height,
          (unsigned)params.pix_fmt);
 
-   if (!record_driver_init_first(&driver->recording, &driver->recording_data, &params))
+   if (!record_driver_init_first(&recording_driver, &recording_data, &params))
    {
-      RARCH_ERR(RETRO_LOG_INIT_RECORDING_FAILED);
+      RARCH_ERR("%s\n", msg_hash_to_str(MSG_FAILED_TO_START_RECORDING));
       event_command(EVENT_CMD_GPU_RECORD_DEINIT);
 
       return false;
    }
 
    return true;
+}
+
+void *recording_driver_get_data_ptr(void)
+{
+   return recording_data;
+}
+
+void recording_driver_clear_data_ptr(void)
+{
+   recording_data = NULL;
+}
+
+void recording_driver_set_data_ptr(void *data)
+{
+   recording_data = data;
 }

@@ -24,7 +24,15 @@
 #include "config.h"
 #endif
 
-#include "dylib.h"
+enum rarch_core_type 
+{
+   CORE_TYPE_PLAIN = 0,
+   CORE_TYPE_DUMMY,
+#ifdef HAVE_FFMPEG
+   CORE_TYPE_FFMPEG,
+#endif
+   CORE_TYPE_IMAGEVIEWER
+};
 
 #ifdef __cplusplus
 extern "C" {
@@ -115,56 +123,58 @@ const struct retro_controller_description *
  **/
 bool rarch_environment_cb(unsigned cmd, void *data);
 
-extern void (*pretro_init)(void);
+struct retro_core_t
+{
+   void (*retro_init)(void);
+   void (*retro_deinit)(void);
+   unsigned (*retro_api_version)(void);
+   void (*retro_get_system_info)(struct retro_system_info*);
+   void (*retro_get_system_av_info)(struct retro_system_av_info*);
+   void (*retro_set_environment)(retro_environment_t);
+   void (*retro_set_video_refresh)(retro_video_refresh_t);
+   void (*retro_set_audio_sample)(retro_audio_sample_t);
+   void (*retro_set_audio_sample_batch)(retro_audio_sample_batch_t);
+   void (*retro_set_input_poll)(retro_input_poll_t);
+   void (*retro_set_input_state)(retro_input_state_t);
+   void (*retro_set_controller_port_device)(unsigned, unsigned);
+   void (*retro_reset)(void); 
+   void (*retro_run)(void);
+   size_t (*retro_serialize_size)(void);
+   bool (*retro_serialize)(void*, size_t);
+   bool (*retro_unserialize)(const void*, size_t);
+   void (*retro_cheat_reset)(void);
+   void (*retro_cheat_set)(unsigned, bool, const char*);
+   bool (*retro_load_game)(const struct retro_game_info*);
+   bool (*retro_load_game_special)(unsigned, const struct retro_game_info*, size_t);
+   void (*retro_unload_game)(void);
+   unsigned (*retro_get_region)(void);
+   void *(*retro_get_memory_data)(unsigned);
+   size_t (*retro_get_memory_size)(unsigned);
+};
 
-extern void (*pretro_deinit)(void);
+extern struct retro_core_t core;
 
-extern unsigned (*pretro_api_version)(void);
+/**
+ * init_libretro_sym:
+ * @type                        : Type of core to be loaded.
+ *                                If CORE_TYPE_DUMMY, will 
+ *                                load dummy symbols.
+ *
+ * Initializes libretro symbols and
+ * setups environment callback functions.
+ **/
+void init_libretro_sym(enum rarch_core_type type);
 
-extern void (*pretro_get_system_info)(struct retro_system_info*);
-
-extern void (*pretro_get_system_av_info)(struct retro_system_av_info*);
-
-extern void (*pretro_set_environment)(retro_environment_t);
-
-extern void (*pretro_set_video_refresh)(retro_video_refresh_t);
-
-extern void (*pretro_set_audio_sample)(retro_audio_sample_t);
-
-extern void (*pretro_set_audio_sample_batch)(retro_audio_sample_batch_t);
-
-extern void (*pretro_set_input_poll)(retro_input_poll_t);
-
-extern void (*pretro_set_input_state)(retro_input_state_t);
-
-extern void (*pretro_set_controller_port_device)(unsigned, unsigned);
-
-extern void (*pretro_reset)(void); 
-
-extern void (*pretro_run)(void);
-
-extern size_t (*pretro_serialize_size)(void);
-
-extern bool (*pretro_serialize)(void*, size_t);
-
-extern bool (*pretro_unserialize)(const void*, size_t);
-
-extern void (*pretro_cheat_reset)(void);
-
-extern void (*pretro_cheat_set)(unsigned, bool, const char*);
-
-extern bool (*pretro_load_game)(const struct retro_game_info*);
-
-extern bool (*pretro_load_game_special)(unsigned,
-      const struct retro_game_info*, size_t);
-
-extern void (*pretro_unload_game)(void);
-
-extern unsigned (*pretro_get_region)(void);
-
-extern void *(*pretro_get_memory_data)(unsigned);
-
-extern size_t (*pretro_get_memory_size)(unsigned);
+/**
+ * uninit_libretro_sym:
+ *
+ * Frees libretro core.
+ *
+ * Frees all core options,
+ * associated state, and
+ * unbind all libretro callback symbols.
+ **/
+void uninit_libretro_sym(void);
 
 
 #ifdef __cplusplus

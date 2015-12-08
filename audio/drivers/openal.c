@@ -13,8 +13,8 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../../driver.h"
-#include "../../general.h"
+#include <string.h>
+#include <time.h>
 
 #ifdef __APPLE__
 #include <OpenAL/al.h>
@@ -24,12 +24,13 @@
 #include <AL/alc.h>
 #endif
 
-#include <time.h>
-#include <string.h>
-
 #ifdef _WIN32
 #include <windows.h>
 #endif
+
+#include "../audio_driver.h"
+#include "../../configuration.h"
+#include "../../verbosity.h"
 
 #define BUFSIZE 1024
 
@@ -150,8 +151,8 @@ static bool al_get_buffer(al_t *al, ALuint *buffer)
          if (al->nonblock)
             return false;
 
-         // Must sleep as there is no proper blocking method. :(
-         rarch_sleep(1);
+         /* Must sleep as there is no proper blocking method. */
+         retro_sleep(1);
       }
    }
 

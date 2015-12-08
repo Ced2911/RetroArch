@@ -14,17 +14,18 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "SDL.h"
-#include "../../driver.h"
 #include <stdlib.h>
 #include <string.h>
+
+#include <gfx/scaler/scaler.h>
+
+#include "SDL.h"
+
+#include "../../driver.h"
 #include "../../general.h"
 #include "../../performance.h"
-#include <gfx/scaler/scaler.h>
-#include "../video_viewport.h"
-#include "../video_monitor.h"
 #include "../video_context_driver.h"
-#include "../font_renderer_driver.h"
+#include "../font_driver.h"
 
 #ifdef HAVE_X11
 #include "../common/x11_common.h"
@@ -218,8 +219,6 @@ static void sdl_render_msg(sdl_video_t *vid, SDL_Surface *buffer,
 
 static void sdl_gfx_set_handles(void)
 {
-   driver_t *driver = driver_get_ptr();
-
    /* SysWMinfo headers are broken on OSX. */
 #if defined(_WIN32) || defined(HAVE_X11)
    SDL_SysWMinfo info;
@@ -229,13 +228,13 @@ static void sdl_gfx_set_handles(void)
       return;
 
 #if defined(_WIN32)
-   driver->display_type  = RARCH_DISPLAY_WIN32;
-   driver->video_display = 0;
-   driver->video_window  = (uintptr_t)info.window;
+   video_driver_display_type_set(RARCH_DISPLAY_WIN32);
+   video_driver_display_set(0);
+   video_driver_window_set((uintptr_t)info.window);
 #elif defined(HAVE_X11)
-   driver->display_type  = RARCH_DISPLAY_X11;
-   driver->video_display = (uintptr_t)info.info.x11.display;
-   driver->video_window  = (uintptr_t)info.info.x11.window;
+   video_driver_display_type_set(RARCH_DISPLAY_X11);
+   video_driver_display_set((uintptr_t)info.info.x11.display);
+   video_driver_window_set((uintptr_t)info.info.x11.window);
 #endif
 #endif
 }
@@ -243,6 +242,7 @@ static void sdl_gfx_set_handles(void)
 static void *sdl_gfx_init(const video_info_t *video, const input_driver_t **input, void **input_data)
 {
    unsigned full_x, full_y;
+   const SDL_VideoInfo *video_info = NULL;
    sdl_video_t *vid = NULL;
    settings_t *settings = config_get_ptr();
 
@@ -262,8 +262,8 @@ static void *sdl_gfx_init(const video_info_t *video, const input_driver_t **inpu
    if (!vid)
       return NULL;
 
-   const SDL_VideoInfo *video_info = SDL_GetVideoInfo();
-   rarch_assert(video_info);
+   video_info = SDL_GetVideoInfo();
+   retro_assert(video_info);
    full_x = video_info->current_w;
    full_y = video_info->current_h;
    RARCH_LOG("[SDL]: Detecting desktop resolution %ux%u.\n", full_x, full_y);
@@ -345,10 +345,12 @@ static void sdl_gfx_check_window(sdl_video_t *vid)
 }
 
 static bool sdl_gfx_frame(void *data, const void *frame, unsigned width,
-      unsigned height, unsigned pitch, const char *msg)
+      unsigned height, uint64_t frame_count,
+      unsigned pitch, const char *msg)
 {
-   char buf[128];
-   sdl_video_t *vid = (sdl_video_t*)data;
+   char                       buf[128] = {0};
+   static struct retro_perf_counter sdl_scale = {0};
+   sdl_video_t                    *vid = (sdl_video_t*)data;
 
    if (!frame)
       return true;
@@ -358,10 +360,10 @@ static bool sdl_gfx_frame(void *data, const void *frame, unsigned width,
    if (SDL_MUSTLOCK(vid->screen))
       SDL_LockSurface(vid->screen);
 
-   RARCH_PERFORMANCE_INIT(sdl_scale);
-   RARCH_PERFORMANCE_START(sdl_scale);
+   rarch_perf_init(&sdl_scale, "sdl_scale");
+   retro_perf_start(&sdl_scale);
    scaler_ctx_scale(&vid->scaler, vid->screen->pixels, frame);
-   RARCH_PERFORMANCE_STOP(sdl_scale);
+   retro_perf_stop(&sdl_scale);
 
    if (vid->menu.active)
       SDL_BlitSurface(vid->menu.frame, NULL, vid->screen, NULL);
@@ -401,15 +403,12 @@ static bool sdl_gfx_focus(void *data)
 
 static bool sdl_gfx_suppress_screensaver(void *data, bool enable)
 {
-   driver_t *driver = driver_get_ptr();
-
    (void)data;
    (void)enable;
-
 #ifdef HAVE_X11
-   if (driver->display_type == RARCH_DISPLAY_X11)
+   if (video_driver_display_type_get() == RARCH_DISPLAY_X11)
    {
-      x11_suspend_screensaver(driver->video_window);
+      x11_suspend_screensaver(video_driver_window_get());
       return true;
    }
 #endif
@@ -439,32 +438,32 @@ static void sdl_set_filtering(void *data, unsigned index, bool smooth)
    vid->scaler.scaler_type = smooth ? SCALER_TYPE_BILINEAR : SCALER_TYPE_POINT;
 }
 
-static void sdl_set_aspect_ratio(void *data, unsigned aspectratio_index)
+static void sdl_set_aspect_ratio(void *data, unsigned aspect_ratio_idx)
 {
-   sdl_video_t *vid = (sdl_video_t*)data;
-   global_t *global = global_get_ptr();
+   enum rarch_display_ctl_state cmd = RARCH_DISPLAY_CTL_NONE;
 
-   switch (aspectratio_index)
+   switch (aspect_ratio_idx)
    {
       case ASPECT_RATIO_SQUARE:
-         video_viewport_set_square_pixel(
-               global->system.av_info.geometry.base_width,
-               global->system.av_info.geometry.base_height);
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_SQUARE_PIXEL;
          break;
 
       case ASPECT_RATIO_CORE:
-         video_viewport_set_core();
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_CORE;
          break;
 
       case ASPECT_RATIO_CONFIG:
-         video_viewport_set_config();
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_CONFIG;
          break;
 
       default:
          break;
    }
 
-   global->system.aspect_ratio = aspectratio_lut[aspectratio_index].value;
+   if (cmd != RARCH_DISPLAY_CTL_NONE)
+      video_driver_ctl(cmd, NULL);
+
+   video_driver_set_aspect_ratio_value(aspectratio_lut[aspect_ratio_idx].value);
 }
 
 static void sdl_apply_state_changes(void *data)
@@ -518,10 +517,8 @@ static const video_poke_interface_t sdl_poke_interface = {
    NULL, /* get_video_output_size */
    NULL, /* get_video_output_prev */
    NULL, /* get_video_output_next */
-#ifdef HAVE_FBO
-   NULL,
-   NULL,
-#endif
+   NULL, /* get_current_framebuffer */
+   NULL, /* get_proc_address */
    sdl_set_aspect_ratio,
    sdl_apply_state_changes,
 #ifdef HAVE_MENU
@@ -576,6 +573,7 @@ video_driver_t video_sdl = {
    sdl_gfx_set_shader,
    sdl_gfx_free,
    "sdl",
+   NULL,
    sdl_gfx_set_rotation,
    sdl_gfx_viewport_info,
    sdl_gfx_read_viewport,

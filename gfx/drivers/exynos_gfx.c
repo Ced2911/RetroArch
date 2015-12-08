@@ -24,20 +24,18 @@
 #include <stdint.h>
 #include <assert.h>
 
-#include <xf86drmMode.h>
 #include <drm_fourcc.h>
 #include <libdrm/exynos_drmif.h>
-
 #include <exynos/exynos_fimg2d.h>
 
 #include <retro_inline.h>
 
+#include "../common/drm_common.h"
+
 #include "../../general.h"
 #include "../../retroarch.h"
 #include "../../runloop.h"
-#include "../video_viewport.h"
-#include "../video_monitor.h"
-#include "../font_renderer_driver.h"
+#include "../font_driver.h"
 
 /* TODO: Honor these properties: vsync, menu rotation, menu alpha, aspect ratio change */
 
@@ -109,32 +107,10 @@ struct exynos_page
   bool clear;     /* Set if page has to be cleared. */
 };
 
-struct exynos_fliphandler
-{
-  struct pollfd fds;
-  drmEventContext evctx;
-};
-
-struct exynos_drm
-{
-  drmModeRes *resources;
-  drmModeConnector *connector;
-  drmModeEncoder *encoder;
-  drmModeModeInfo *mode;
-  drmModeCrtc *orig_crtc;
-
-  uint32_t crtc_id;
-  uint32_t connector_id;
-};
-
 struct exynos_data
 {
   char drmname[32];
-  int fd;
   struct exynos_device *device;
-
-  struct exynos_drm *drm;
-  struct exynos_fliphandler *fliphandler;
 
   /* G2D is used for scaling to framebuffer dimensions. */
   struct g2d_context *g2d;
@@ -181,14 +157,15 @@ static INLINE unsigned align_common(unsigned i, unsigned j)
 /* Find the index of a compatible DRM device. */
 static int exynos_get_device_index(void)
 {
-   char buf[32];
-   int fd;
    drmVersionPtr ver;
-   int index = 0;
-   bool found = false;
+   char buf[32]       = {0};
+   int index          = 0;
+   bool found         = false;
 
    while (!found)
    {
+      int fd;
+
       snprintf(buf, sizeof(buf), "/dev/dri/card%d", index);
 
       fd = open(buf, O_RDWR);
@@ -196,7 +173,7 @@ static int exynos_get_device_index(void)
 
       ver = drmGetVersion(fd);
 
-      if (strcmp("exynos", ver->name) == 0)
+      if (!strcmp("exynos", ver->name))
          found = true;
       else
          ++index;
@@ -208,35 +185,6 @@ static int exynos_get_device_index(void)
    if (!found)
       return -1;
    return index;
-}
-
-/* Restore the original CRTC. */
-static void exynos_restore_crtc(struct exynos_drm *d, int fd)
-{
-   if (!d->orig_crtc)
-      return;
-
-   drmModeSetCrtc(fd, d->orig_crtc->crtc_id,
-         d->orig_crtc->buffer_id,
-         d->orig_crtc->x,
-         d->orig_crtc->y,
-         &d->connector_id, 1, &d->orig_crtc->mode);
-
-   drmModeFreeCrtc(d->orig_crtc);
-   d->orig_crtc = NULL;
-}
-
-static void exynos_clean_up_drm(struct exynos_drm *d, int fd)
-{
-   if (d->encoder)
-      drmModeFreeEncoder(d->encoder);
-   if (d->connector)
-      drmModeFreeConnector(d->connector);
-   if (d->resources)
-      drmModeFreeResources(d->resources);
-
-   free(d);
-   close(fd);
 }
 
 /* The main pageflip handler, which the DRM executes 
@@ -259,22 +207,6 @@ static void exynos_page_flip_handler(int fd, unsigned frame, unsigned sec,
 
    page->base->pageflip_pending--;
    page->base->cur_page = page;
-}
-
-static void exynos_wait_flip(struct exynos_fliphandler *fh)
-{
-   const int timeout = -1;
-
-   fh->fds.revents = 0;
-
-   if (poll(&fh->fds, 1, timeout) < 0)
-      return;
-
-   if (fh->fds.revents & (POLLHUP | POLLERR))
-      return;
-
-   if (fh->fds.revents & POLLIN)
-      drmHandleEvent(fh->fds.fd, &fh->evctx);
 }
 
 static struct exynos_page *exynos_get_free_page(
@@ -344,10 +276,9 @@ static const char *exynos_buffer_name(enum exynos_buffer_type type)
 static struct exynos_bo *exynos_create_mapped_buffer(
       struct exynos_device *dev, unsigned size)
 {
-   struct exynos_bo *buf;
    const unsigned flags = 0;
+   struct exynos_bo *buf = exynos_bo_create(dev, size, flags);
 
-   buf = exynos_bo_create(dev, size, flags);
    if (!buf)
    {
       RARCH_ERR("[video_exynos]: failed to create temp buffer object\n");
@@ -370,10 +301,14 @@ static int exynos_realloc_buffer(struct exynos_data *pdata,
       enum exynos_buffer_type type, unsigned size)
 {
    struct exynos_bo *buf = pdata->buf[type];
-   unsigned i;
+
+   if (!buf)
+      return -1;
 
    if (size > buf->size)
    {
+      unsigned i;
+
 #if (EXYNOS_GFX_DEBUG_LOG == 1)
       RARCH_LOG("[video_exynos]: reallocating %s buffer (%u -> %u bytes)\n",
             exynos_buffer_name(type), buf->size, size);
@@ -423,8 +358,8 @@ static void exynos_put_glyph_rgba4444(struct exynos_data *pdata,
 {
    unsigned x, y;
    const enum exynos_image_type buf_type = defaults[EXYNOS_IMAGE_FONT].buf_type;
-   const unsigned buf_width = pdata->src[EXYNOS_IMAGE_FONT]->width;
-   uint16_t *__restrict__ dst = (uint16_t*)pdata->buf[buf_type]->vaddr +
+   const              unsigned buf_width = pdata->src[EXYNOS_IMAGE_FONT]->width;
+   uint16_t            *__restrict__ dst = (uint16_t*)pdata->buf[buf_type]->vaddr +
       dst_y * buf_width + dst_x;
 
    for (y = 0; y < g_height; ++y, src += g_pitch, dst += buf_width)
@@ -500,7 +435,7 @@ static int exynos_g2d_init(struct exynos_data *pdata)
 {
    unsigned i;
    struct g2d_image *dst = NULL;
-   struct g2d_context *g2d = g2d_init(pdata->fd);
+   struct g2d_context *g2d = g2d_init(g_drm_fd);
    if (!g2d)
       return -1;
 
@@ -584,16 +519,13 @@ static void exynos_g2d_free(struct exynos_data *pdata)
 
 static int exynos_open(struct exynos_data *pdata)
 {
-   char buf[32];
    unsigned i;
-   int fd = -1;
-   struct exynos_drm *drm                 = NULL;
-   struct exynos_fliphandler *fliphandler = NULL;
-   settings_t *settings                   = config_get_ptr();
+   int fd                                 = -1;
+   char buf[32]                           = {0};
    int devidx                             = exynos_get_device_index();
 
    if (pdata)
-      pdata->fd                              = -1;
+      g_drm_fd                            = -1;
 
    if (devidx != -1)
       snprintf(buf, sizeof(buf), "/dev/dri/card%d", devidx);
@@ -611,88 +543,32 @@ static int exynos_open(struct exynos_data *pdata)
       return -1;
    }
 
-   drm = (struct exynos_drm*)calloc(1, sizeof(struct exynos_drm));
-
-   if (!drm)
-   {
-      RARCH_ERR("[video_exynos]: failed to allocate DRM.\n");
-      close(fd);
-      return -1;
-   }
-
-   drm->resources = drmModeGetResources(fd);
-   if (!drm->resources)
-   {
-      RARCH_ERR("[video_exynos]: failed to get DRM resources\n");
+   if (!drm_get_resources(fd))
       goto fail;
-   }
 
-   for (i = 0; i < drm->resources->count_connectors; ++i)
-   {
-      if (settings->video.monitor_index != 0 &&
-            settings->video.monitor_index - 1 != i)
-         continue;
-
-      drm->connector = drmModeGetConnector(fd, drm->resources->connectors[i]);
-      if (!drm->connecto)
-         continue;
-
-      if (drm->connector->connection == DRM_MODE_CONNECTED &&
-            drm->connector->count_modes > 0)
-         break;
-
-      drmModeFreeConnector(drm->connector);
-      drm->connector = NULL;
-   }
-
-   if (i == drm->resources->count_connectors)
-   {
-      RARCH_ERR("[video_exynos]: no currently active connector found.\n");
+   if (!drm_get_decoder(fd))
       goto fail;
-   }
 
-   for (i = 0; i < drm->resources->count_encoders; i++)
-   {
-      drm->encoder = drmModeGetEncoder(fd, drm->resources->encoders[i]);
-
-      if (!drm->encoder)
-         continue;
-
-      if (drm->encoder->encoder_id == drm->connector->encoder_id)
-         break;
-
-      drmModeFreeEncoder(drm->encoder);
-      drm->encoder = NULL;
-   }
-
-   fliphandler = (struct exynos_fliphandler*)calloc(1, sizeof(struct exynos_fliphandler));
-
-   if (!fliphandler)
-   {
-      RARCH_ERR("[video_exynos]: failed to allocate fliphandler\n");
+   if (!drm_get_encoder(fd))
       goto fail;
-   }
 
    /* Setup the flip handler. */
-   fliphandler->fds.fd                  = fd;
-   fliphandler->fds.events              = POLLIN;
-   fliphandler->evctx.version           = DRM_EVENT_CONTEXT_VERSION;
-   fliphandler->evctx.page_flip_handler = exynos_page_flip_handler;
+   g_drm_fds.fd                         = fd;
+   g_drm_fds.events                     = POLLIN;
+   g_drm_evctx.version                  = DRM_EVENT_CONTEXT_VERSION;
+   g_drm_evctx.page_flip_handler        = exynos_page_flip_handler;
 
    strncpy(pdata->drmname, buf, sizeof(buf));
-   pdata->fd = fd;
-
-   pdata->drm = drm;
-   pdata->fliphandler = fliphandler;
+   g_drm_fd = fd;
 
    RARCH_LOG("[video_exynos]: using DRM device \"%s\" with connector id %u.\n",
-         pdata->drmname, pdata->drm->connector->connector_id);
+         pdata->drmname, g_drm_connector->connector_id);
 
    return 0;
 
 fail:
-   free(fliphandler);
-   exynos_clean_up_drm(drm, fd);
+   drm_free();
+   close(g_drm_fd);
 
    return -1;
 }
@@ -700,37 +576,32 @@ fail:
 /* Counterpart to exynos_open. */
 static void exynos_close(struct exynos_data *pdata)
 {
-   free(pdata->fliphandler);
-   pdata->fliphandler = NULL;
-
    memset(pdata->drmname, 0, sizeof(char) * 32);
 
-   exynos_clean_up_drm(pdata->drm, pdata->fd);
-   pdata->fd = -1;
-   pdata->drm = NULL;
+   drm_free();
+   close(g_drm_fd);
+   g_drm_fd   = -1;
 }
 
 static int exynos_init(struct exynos_data *pdata, unsigned bpp)
 {
    unsigned i;
-   int fd                 = pdata->fd;
-   struct exynos_drm *drm = pdata->drm;
    settings_t *settings   = config_get_ptr();
 
    if (settings->video.fullscreen_x != 0 &&
          settings->video.fullscreen_y != 0)
    {
-      for (i = 0; i < drm->connector->count_modes; i++)
+      for (i = 0; i < g_drm_connector->count_modes; i++)
       {
-         if (drm->connector->modes[i].hdisplay == settings->video.fullscreen_x &&
-               drm->connector->modes[i].vdisplay == settings->video.fullscreen_y)
+         if (g_drm_connector->modes[i].hdisplay == settings->video.fullscreen_x &&
+               g_drm_connector->modes[i].vdisplay == settings->video.fullscreen_y)
          {
-            drm->mode = &drm->connector->modes[i];
+            g_drm_mode = &g_drm_connector->modes[i];
             break;
          }
       }
 
-      if (!drm->mode)
+      if (!g_drm_mode)
       {
          RARCH_ERR("[video_exynos]: requested resolution (%ux%u) not available\n",
                settings->video.fullscreen_x, settings->video.fullscreen_y);
@@ -741,26 +612,21 @@ static int exynos_init(struct exynos_data *pdata, unsigned bpp)
    else
    {
       /* Select first mode, which is the native one. */
-      drm->mode = &drm->connector->modes[0];
+      g_drm_mode = &g_drm_connector->modes[0];
    }
 
-   if (drm->mode->hdisplay == 0 || drm->mode->vdisplay == 0)
+   if (g_drm_mode->hdisplay == 0 || g_drm_mode->vdisplay == 0)
    {
       RARCH_ERR("[video_exynos]: failed to select sane resolution\n");
       goto fail;
    }
 
-   drm->crtc_id      = drm->encoder->crtc_id;
-   drm->connector_id = drm->connector->connector_id;
-   drm->orig_crtc    = drmModeGetCrtc(fd, drm->crtc_id);
+   drm_setup(g_drm_fd);
 
-   if (!drm->orig_crtc)
-      RARCH_WARN("[video_exynos]: cannot find original crtc\n");
+   pdata->width      = g_drm_mode->hdisplay;
+   pdata->height     = g_drm_mode->vdisplay;
 
-   pdata->width      = drm->mode->hdisplay;
-   pdata->height     = drm->mode->vdisplay;
-
-   pdata->aspect = (float)drm->mode->hdisplay / (float)drm->mode->vdisplay;
+   pdata->aspect = (float)g_drm_mode->hdisplay / (float)g_drm_mode->vdisplay;
 
    /* Always use triple buffering to reduce chance of tearing. */
    pdata->num_pages  = 3;
@@ -775,9 +641,9 @@ static int exynos_init(struct exynos_data *pdata, unsigned bpp)
    return 0;
 
 fail:
-   exynos_restore_crtc(drm, fd);
+   drm_restore_crtc();
 
-   drm->mode         = NULL;
+   g_drm_mode         = NULL;
 
    return -1;
 }
@@ -785,11 +651,7 @@ fail:
 /* Counterpart to exynos_init. */
 static void exynos_deinit(struct exynos_data *pdata)
 {
-   struct exynos_drm *drm = pdata->drm;
-
-   exynos_restore_crtc(drm, pdata->fd);
-
-   drm              = NULL;
+   drm_restore_crtc();
 
    pdata->width     = 0;
    pdata->height    = 0;
@@ -807,7 +669,7 @@ static int exynos_alloc(struct exynos_data *pdata)
    uint32_t pixel_format;
    const unsigned flags = 0;
    uint32_t handles[4] = {0}, pitches[4] = {0}, offsets[4] = {0};
-   struct exynos_device *device = exynos_device_create(pdata->fd);
+   struct exynos_device *device = exynos_device_create(g_drm_fd);
 
    if (!device)
    {
@@ -872,7 +734,7 @@ static int exynos_alloc(struct exynos_data *pdata)
    {
       handles[0] = pages[i].bo->handle;
 
-      if (drmModeAddFB2(pdata->fd, pdata->width, pdata->height,
+      if (drmModeAddFB2(g_drm_fd, pdata->width, pdata->height,
                pixel_format, handles, pitches, offsets,
                &pages[i].buf_id, flags))
       {
@@ -882,9 +744,9 @@ static int exynos_alloc(struct exynos_data *pdata)
    }
 
    /* Setup CRTC: display the last allocated page. */
-   if (drmModeSetCrtc(pdata->fd, pdata->drm->crtc_id,
+   if (drmModeSetCrtc(g_drm_fd, g_crtc_id,
             pages[pdata->num_pages - 1].buf_id,
-            0, 0, &pdata->drm->connector_id, 1, pdata->drm->mode))
+            0, 0, &g_drm_connector_id, 1, g_drm_mode))
    {
       RARCH_ERR("[video_exynos]: initial CRTC setup failed.\n");
       goto fail;
@@ -910,7 +772,7 @@ static void exynos_free(struct exynos_data *pdata)
    unsigned i;
 
    /* Disable the CRTC. */
-   if (drmModeSetCrtc(pdata->fd, pdata->drm->crtc_id, 0,
+   if (drmModeSetCrtc(g_drm_fd, g_crtc_id, 0,
             0, 0, NULL, 0, NULL))
       RARCH_WARN("[video_exynos]: failed to disable the CRTC.\n");
 
@@ -959,7 +821,7 @@ static struct exynos_page *exynos_free_page(struct exynos_data *pdata)
       page = exynos_get_free_page(pdata->pages, pdata->num_pages);
 
       if (!page)
-         exynos_wait_flip(pdata->fliphandler);
+         drm_wait_flip(-1);
    }
 
    dst->bo[0] = page->bo->handle;
@@ -1128,10 +990,10 @@ static int exynos_flip(struct exynos_data *pdata, struct exynos_page *page)
 {
    /* We don't queue multiple page flips. */
    if (pdata->pageflip_pending > 0)
-      exynos_wait_flip(pdata->fliphandler);
+      drm_wait_flip(-1);
 
    /* Issue a page flip at the next vblank interval. */
-   if (drmModePageFlip(pdata->fd, pdata->drm->crtc_id, page->buf_id,
+   if (drmModePageFlip(g_drm_fd, g_crtc_id, page->buf_id,
             DRM_MODE_PAGE_FLIP_EVENT, page) != 0)
    {
       RARCH_ERR("[video_exynos]: failed to issue page flip\n");
@@ -1144,7 +1006,7 @@ static int exynos_flip(struct exynos_data *pdata, struct exynos_page *page)
 
    /* On startup no frame is displayed. We therefore wait for the initial flip to finish. */
    if (!pdata->cur_page)
-      exynos_wait_flip(pdata->fliphandler);
+      drm_wait_flip(-1);
 
    return 0;
 }
@@ -1386,7 +1248,7 @@ static void exynos_gfx_free(void *data)
 
    /* Flush pages: One page remains, the one being displayed at this moment. */
    while (exynos_pages_used(pdata->pages, pdata->num_pages) > 1)
-      exynos_wait_flip(pdata->fliphandler);
+      drm_wait_flip(-1);
 
    exynos_free(pdata);
    exynos_deinit(pdata);
@@ -1405,7 +1267,7 @@ static void exynos_gfx_free(void *data)
 }
 
 static bool exynos_gfx_frame(void *data, const void *frame, unsigned width,
-      unsigned height, unsigned pitch, const char *msg)
+      unsigned height, uint64_t frame_count, unsigned pitch, const char *msg)
 {
    struct exynos_video *vid = data;
    struct exynos_page *page = NULL;
@@ -1439,10 +1301,11 @@ static bool exynos_gfx_frame(void *data, const void *frame, unsigned width,
 
    if (settings->fps_show)
    {
-      char buffer[128], buffer_fps[128];
+      char buffer[128]     = {0};
+      char buffer_fps[128] = {0};
       video_monitor_get_fps(buffer, sizeof(buffer),
             settings->fps_show ? buffer_fps : NULL, sizeof(buffer_fps));
-      rarch_main_msg_queue_push(buffer_fps, 1, 1, false);
+      runloop_msg_queue_push(buffer_fps, 1, 1, false);
    }
 
    /* If at this point the dimension parameters are still zero, setup some  *
@@ -1538,29 +1401,30 @@ static void exynos_gfx_viewport_info(void *data, struct video_viewport *vp)
 static void exynos_set_aspect_ratio(void *data, unsigned aspect_ratio_idx)
 {
    struct exynos_video *vid = (struct exynos_video*)data;
-   global_t *global         = global_get_ptr();
+   enum rarch_display_ctl_state cmd = RARCH_DISPLAY_CTL_NONE;
 
    switch (aspect_ratio_idx)
    {
       case ASPECT_RATIO_SQUARE:
-         video_viewport_set_square_pixel(
-               global->system.av_info.geometry.base_width,
-               global->system.av_info.geometry.base_height);
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_SQUARE_PIXEL;
          break;
 
       case ASPECT_RATIO_CORE:
-         video_viewport_set_core();
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_CORE;
          break;
 
       case ASPECT_RATIO_CONFIG:
-         video_viewport_set_config();
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_CONFIG;
          break;
 
       default:
          break;
    }
 
-   global->system.aspect_ratio = aspectratio_lut[aspect_ratio_idx].value;
+   if (cmd != RARCH_DISPLAY_CTL_NONE)
+      video_driver_ctl(cmd, NULL);
+
+   video_driver_set_aspect_ratio_value(aspectratio_lut[aspect_ratio_idx].value);
    vid->aspect_changed = true;
 }
 
@@ -1622,23 +1486,21 @@ static void exynos_show_mouse(void *data, bool state)
 }
 
 static const video_poke_interface_t exynos_poke_interface = {
-  NULL, /* set_video_mode */
-  NULL, /* set_filtering */
-  NULL, /* get_video_output_size */
-  NULL, /* get_video_output_prev */
-  NULL, /* get_video_output_next */
-#ifdef HAVE_FBO
-  NULL, /* get_current_framebuffer */
-#endif
-  NULL, /* get_proc_address */
-  exynos_set_aspect_ratio,
-  exynos_apply_state_changes,
+   NULL, /* set_video_mode */
+   NULL, /* set_filtering */
+   NULL, /* get_video_output_size */
+   NULL, /* get_video_output_prev */
+   NULL, /* get_video_output_next */
+   NULL, /* get_current_framebuffer */
+   NULL, /* get_proc_address */
+   exynos_set_aspect_ratio,
+   exynos_apply_state_changes,
 #ifdef HAVE_MENU
-  exynos_set_texture_frame,
-  exynos_set_texture_enable,
+   exynos_set_texture_frame,
+   exynos_set_texture_enable,
 #endif
-  exynos_set_osd_msg,
-  exynos_show_mouse
+   exynos_set_osd_msg,
+   exynos_show_mouse
 };
 
 static void exynos_gfx_get_poke_interface(void *data,
@@ -1677,6 +1539,7 @@ video_driver_t video_exynos = {
   exynos_gfx_set_shader,
   exynos_gfx_free,
   "exynos",
+  NULL, /* set_viewport */
   exynos_gfx_set_rotation,
   exynos_gfx_viewport_info,
   exynos_gfx_read_viewport,

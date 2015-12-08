@@ -18,15 +18,11 @@
 #define __COCOA_INPUT_H__
 
 #include <stdint.h>
+#include <boolean.h>
 #include "../../general.h"
 
 /* Input responder */
 #define MAX_TOUCHES  16
-#define MAX_KEYS     256
-
-#ifndef NUM_HATS
-#define NUM_HATS     4
-#endif
 
 typedef struct
 {
@@ -37,37 +33,23 @@ typedef struct
 
 typedef struct
 {
+   bool blocked;
    cocoa_touch_data_t touches[MAX_TOUCHES];
    uint32_t touch_count;
 
    uint32_t mouse_buttons;
-   int16_t mouse_x;
-   int16_t mouse_y;
+   int16_t mouse_x_last;
+   int16_t mouse_y_last;
+   int16_t window_pos_x;
+   int16_t window_pos_y;
+   int16_t mouse_rel_x;
+   int16_t mouse_rel_y;
    int16_t mouse_wu;
    int16_t mouse_wd;
 
-   uint32_t key_state[MAX_KEYS];
-
-   uint32_t buttons[MAX_USERS];
-   int16_t axes[MAX_USERS][4];
-   int8_t  hats[NUM_HATS][2];
-
-   bool icade_enabled;
-   bool small_keyboard_enabled;
-   bool small_keyboard_active;
-   uint32_t icade_buttons;
-    
+   const input_device_driver_t *sec_joypad;
    const input_device_driver_t *joypad;
 } cocoa_input_data_t;
-
-void cocoa_input_enable_icade(bool on);
-
-void cocoa_input_enable_small_keyboard(bool on);
-
-void cocoa_input_reset_icade_buttons(void);
-
-void cocoa_input_keyboard_event(bool down, unsigned code,
-      uint32_t character, uint32_t mod, unsigned device);
 
 extern int32_t cocoa_input_find_any_key(void);
 

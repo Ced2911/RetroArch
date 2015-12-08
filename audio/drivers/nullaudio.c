@@ -13,11 +13,13 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../../general.h"
-#include "../../driver.h"
+#include "../audio_driver.h"
+#include "../../verbosity.h"
 
 static void *null_audio_init(const char *device, unsigned rate, unsigned latency)
 {
+   RARCH_ERR("Using the null audio driver. RetroArch will be silent.");
+
    (void)device;
    (void)rate;
    (void)latency;

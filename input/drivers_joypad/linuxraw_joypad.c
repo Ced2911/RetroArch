@@ -13,19 +13,20 @@
  *  You should have received a copy of the GNU General Public License along with RetroArch.
  *  If not, see <http://www.gnu.org/licenses/>.
  */
-
-#include "../input_autodetect.h"
-#include "../../general.h"
-#include <unistd.h>
 #include <stdint.h>
+#include <unistd.h>
 #include <string.h>
 #include <limits.h>
 #include <errno.h>
+
 #include <sys/types.h>
 #include <sys/inotify.h>
-#include <sys/epoll.h>
-#include <fcntl.h>
 #include <linux/joystick.h>
+
+#include "../common/epoll_common.h"
+#include "../input_autodetect.h"
+#include "../../general.h"
+#include "../../verbosity.h"
 
 #define NUM_BUTTONS 32
 #define NUM_AXES 32
@@ -40,8 +41,7 @@ struct linuxraw_joypad
 };
 
 static struct linuxraw_joypad linuxraw_pads[MAX_USERS];
-static int g_notify;
-static int g_epoll;
+static int g_inotify;
 static bool g_hotplug;
 
 static void linuxraw_poll_pad(struct linuxraw_joypad *pad)
@@ -93,26 +93,24 @@ static bool linuxraw_joypad_init_pad(const char *path, struct linuxraw_joypad *p
       {
          RARCH_LOG("[Device]: Found pad: %s on %s.\n", pad->ident, path);
 
-#ifndef IS_JOYCONFIG
          if (g_hotplug)
          {
-            char msg[512];
-            snprintf(msg, sizeof(msg), "Device #%u (%s) connected.", (unsigned)(pad - linuxraw_pads), pad->ident);
-            rarch_main_msg_queue_push(msg, 0, 60, false);
-         }
-#endif
-      }
+            char msg[512] = {0};
 
+            snprintf(msg, sizeof(msg), "Device #%u (%s) connected.", (unsigned)(pad - linuxraw_pads), pad->ident);
+            runloop_msg_queue_push(msg, 0, 60, false);
+         }
+      }
       else
          RARCH_ERR("[Device]: Didn't find ident of %s.\n", path);
 
-      struct epoll_event event;
-      event.events = EPOLLIN;
-      event.data.ptr = pad;
-      epoll_ctl(g_epoll, EPOLL_CTL_ADD, pad->fd, &event);
+      if (!epoll_add(pad->fd, pad))
+         goto error;
+
       return true;
    }
 
+error:
    RARCH_ERR("[Device]: Failed to open pad %s (error: %s).\n", path, strerror(errno));
    return false;
 }
@@ -126,9 +124,9 @@ static void handle_plugged_pad(void)
    if (!event_buf)
       return;
 
-   while ((rc = read(g_notify, event_buf, event_size)) >= 0)
+   while ((rc = read(g_inotify, event_buf, event_size)) >= 0)
    {
-      struct inotify_event *event = NULL;
+      struct inotify_event *event = (struct inotify_event*)&event_buf[0];
 
       /* Can read multiple events in one read() call. */
 
@@ -150,17 +148,9 @@ static void handle_plugged_pad(void)
          {
             if (linuxraw_pads[idx].fd >= 0)
             {
-
-#ifndef IS_JOYCONFIG
                if (g_hotplug)
-               {
-                  char msg[512];
-                  snprintf(msg, sizeof(msg), "Device #%u (%s) disconnected.", idx, linuxraw_pads[idx].ident);
-                  rarch_main_msg_queue_push(msg, 0, 60, false);
-               }
-#endif
+                  input_config_autoconfigure_disconnect(idx, linuxraw_pads[idx].ident);
 
-               RARCH_LOG("[Device]: Device %s disconnected.\n", linuxraw_pads[idx].ident);
                close(linuxraw_pads[idx].fd);
                linuxraw_pads[idx].buttons = 0;
                memset(linuxraw_pads[idx].axes, 0, sizeof(linuxraw_pads[idx].axes));
@@ -172,11 +162,11 @@ static void handle_plugged_pad(void)
                input_config_autoconfigure_joypad(&params);
             }
          }
-         /* Sometimes, device will be created before acess to it is established. */
+         /* Sometimes, device will be created before access to it is established. */
          else if (event->mask & (IN_CREATE | IN_ATTRIB))
          {
             bool ret;
-            char path[PATH_MAX_LENGTH];
+            char path[PATH_MAX_LENGTH] = {0};
 
             snprintf(path, sizeof(path), "/dev/input/%s", event->name);
             ret = linuxraw_joypad_init_pad(path, &linuxraw_pads[idx]);
@@ -202,7 +192,7 @@ static void linuxraw_joypad_poll(void)
    struct epoll_event events[MAX_USERS + 1];
 
 retry:
-   ret = epoll_wait(g_epoll, events, MAX_USERS + 1, 0);
+   ret = epoll_waiting(events, MAX_USERS + 1, 0);
    if (ret < 0 && errno == EINTR)
       goto retry;
 
@@ -215,24 +205,19 @@ retry:
    }
 }
 
-static void linuxraw_joypad_setup_notify(void)
-{
-   fcntl(g_notify, F_SETFL, fcntl(g_notify, F_GETFL) | O_NONBLOCK);
-   inotify_add_watch(g_notify, "/dev/input", IN_DELETE | IN_CREATE | IN_ATTRIB);
-}
-
-static bool linuxraw_joypad_init(void)
+static bool linuxraw_joypad_init(void *data)
 {
    unsigned i;
    settings_t *settings = config_get_ptr();
 
-   g_epoll              = epoll_create(MAX_USERS + 1);
-   if (g_epoll < 0)
+   if (!epoll_new(true))
       return false;
+
+   (void)data;
 
    for (i = 0; i < MAX_USERS; i++)
    {
-      char path[PATH_MAX_LENGTH];
+      char path[PATH_MAX_LENGTH]  = {0};
       autoconfig_params_t params  = {{0}};
       struct linuxraw_joypad *pad = (struct linuxraw_joypad*)&linuxraw_pads[i];
 
@@ -259,16 +244,13 @@ static bool linuxraw_joypad_init(void)
          input_config_autoconfigure_joypad(&params);
    }
 
-   g_notify = inotify_init();
-   if (g_notify >= 0)
+   g_inotify = inotify_init();
+
+   if (g_inotify >= 0)
    {
-      struct epoll_event event;
-
-      linuxraw_joypad_setup_notify();
-
-      event.events = EPOLLIN;
-      event.data.ptr = NULL;
-      epoll_ctl(g_epoll, EPOLL_CTL_ADD, g_notify, &event);
+      fcntl(g_inotify, F_SETFL, fcntl(g_inotify, F_GETFL) | O_NONBLOCK);
+      inotify_add_watch(g_inotify, "/dev/input", IN_DELETE | IN_CREATE | IN_ATTRIB);
+      epoll_add(g_inotify, NULL);
    }
 
    g_hotplug = true;
@@ -291,13 +273,11 @@ static void linuxraw_joypad_destroy(void)
    for (i = 0; i < MAX_USERS; i++)
       linuxraw_pads[i].fd = -1;
 
-   if (g_notify >= 0)
-      close(g_notify);
-   g_notify = -1;
+   if (g_inotify >= 0)
+      close(g_inotify);
+   g_inotify = -1;
 
-   if (g_epoll >= 0)
-      close(g_epoll);
-   g_epoll = -1;
+   epoll_free(true);
 
    g_hotplug = false;
 }

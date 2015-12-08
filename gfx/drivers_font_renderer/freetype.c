@@ -14,17 +14,20 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../font_renderer_driver.h"
-#include <file/file_path.h>
-#include "../../general.h"
-#include <string.h>
-#include <stddef.h>
 #include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
 
 #include <ft2build.h>
+
+#include <file/file_path.h>
+
 #include FT_FREETYPE_H
 
-#define FT_ATLAS_ROWS 8
+#include "../font_driver.h"
+#include "../../general.h"
+
+#define FT_ATLAS_ROWS 16
 #define FT_ATLAS_COLS 16
 #define FT_ATLAS_SIZE (FT_ATLAS_ROWS * FT_ATLAS_COLS)
 
@@ -82,6 +85,7 @@ static bool font_renderer_create_atlas(ft_font_renderer_t *handle)
 
    for (i = 0; i < FT_ATLAS_SIZE; i++)
    {
+      FT_GlyphSlot slot;
       struct font_glyph *glyph = &handle->glyphs[i];
 
       if (!glyph)
@@ -94,7 +98,7 @@ static bool font_renderer_create_atlas(ft_font_renderer_t *handle)
       }
 
       FT_Render_Glyph(handle->face->glyph, FT_RENDER_MODE_NORMAL);
-      FT_GlyphSlot slot = handle->face->glyph;
+      slot = handle->face->glyph;
 
       /* Some glyphs can be blank. */
       buffer[i] = (uint8_t*)calloc(slot->bitmap.rows * slot->bitmap.pitch, 1);
@@ -130,7 +134,6 @@ static bool font_renderer_create_atlas(ft_font_renderer_t *handle)
    /* Blit our texture atlas. */
    for (i = 0; i < FT_ATLAS_SIZE; i++)
    {
-      unsigned r, c;
       uint8_t *dst      = NULL;
       unsigned offset_x = (i % FT_ATLAS_COLS) * max_width;
       unsigned offset_y = (i / FT_ATLAS_COLS) * max_height;
@@ -143,6 +146,7 @@ static bool font_renderer_create_atlas(ft_font_renderer_t *handle)
 
       if (buffer[i])
       {
+         unsigned r, c;
          const uint8_t *src = (const uint8_t*)buffer[i];
 
          for (r = 0; r < handle->glyphs[i].height;
@@ -208,6 +212,7 @@ static const char *font_paths[] = {
    "/usr/share/fonts/truetype/ttf-dejavu/DejaVuSans.ttf",
    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+   "/usr/share/fonts/TTF/Vera.ttf",
 #endif
    "osd-font.ttf", /* Magic font to search for, useful for distribution. */
 };
@@ -226,6 +231,15 @@ static const char *font_renderer_ft_get_default_font(void)
    return NULL;
 }
 
+static int font_renderer_ft_get_line_height(void* data)
+{
+    ft_font_renderer_t *handle = (ft_font_renderer_t*)data;
+    if (!handle)
+      return 0;
+      
+    return handle->face->size->metrics.height/64;
+}
+
 font_renderer_driver_t freetype_font_renderer = {
    font_renderer_ft_init,
    font_renderer_ft_get_atlas,
@@ -233,4 +247,5 @@ font_renderer_driver_t freetype_font_renderer = {
    font_renderer_ft_free,
    font_renderer_ft_get_default_font,
    "freetype",
+   font_renderer_ft_get_line_height,
 };

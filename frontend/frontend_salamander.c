@@ -20,11 +20,14 @@
 #include <string.h>
 
 #include <file/config_file.h>
-#include "../general.h"
-#include "../file_ext.h"
 #include <file/file_path.h>
 #include <file/dir_list.h>
+#include <retro_miscellaneous.h>
+
 #include "frontend_driver.h"
+#include "../defaults.h"
+#include "../file_ext.h"
+#include "../verbosity.h"
 
 struct defaults g_defaults;
 
@@ -42,7 +45,7 @@ static void find_first_libretro_core(char *first_file,
    RARCH_LOG("Searching for valid libretro implementation in: \"%s\".\n",
          dir);
 
-   list = (struct string_list*)dir_list_new(dir, ext, false);
+   list = dir_list_new(dir, ext, false, false);
    if (!list)
    {
       RARCH_ERR("Couldn't read directory. Cannot infer default libretro core.\n");
@@ -80,7 +83,7 @@ static void find_first_libretro_core(char *first_file,
    dir_list_free(list);
 }
 
-static void find_and_set_first_file(char *path, size_t sizeof_path,
+static void find_and_set_first_file(char *s, size_t len,
       const char *ext)
 {
    /* Last fallback - we'll need to start the first executable file 
@@ -89,35 +92,35 @@ static void find_and_set_first_file(char *path, size_t sizeof_path,
 
    char first_file[PATH_MAX_LENGTH] = {0};
    find_first_libretro_core(first_file, sizeof(first_file),
-         g_defaults.core_dir, ext);
+         g_defaults.dir.core, ext);
 
    if (first_file[0] != '\0')
    {
-      fill_pathname_join(path, g_defaults.core_dir, first_file, sizeof_path);
-      RARCH_LOG("libretro_path now set to: %s.\n", path);
+      fill_pathname_join(s, g_defaults.dir.core, first_file, len);
+      RARCH_LOG("libretro_path now set to: %s.\n", s);
    }
    else
       RARCH_ERR("Failed last fallback - RetroArch Salamander will exit.\n");
 }
 
-static void salamander_init(char *libretro_path, size_t sizeof_libretro_path)
+static void salamander_init(char *s, size_t len)
 {
    /* normal executable loading path */
    bool config_file_exists = false;
 
-   if (path_file_exists(g_defaults.config_path))
+   if (path_file_exists(g_defaults.path.config))
       config_file_exists = true;
 
    if (config_file_exists)
    {
       char tmp_str[PATH_MAX_LENGTH];
-      config_file_t * conf = (config_file_t*)config_file_new(g_defaults.config_path);
+      config_file_t * conf = (config_file_t*)config_file_new(g_defaults.path.config);
 
       if (conf)
       {
          config_get_array(conf, "libretro_path", tmp_str, sizeof(tmp_str));
          config_file_free(conf);
-         strlcpy(libretro_path, tmp_str, sizeof_libretro_path);
+         strlcpy(s, tmp_str, len);
       }
 #ifdef GEKKO
       else /* stupid libfat bug or something; sometimes it says the file is there when it doesn't */
@@ -125,10 +128,10 @@ static void salamander_init(char *libretro_path, size_t sizeof_libretro_path)
 #endif
    }
 
-   if (!config_file_exists || !strcmp(libretro_path, ""))
-      find_and_set_first_file(libretro_path, sizeof_libretro_path, EXT_EXECUTABLES);
+   if (!config_file_exists || !strcmp(s, ""))
+      find_and_set_first_file(s, len, EXT_EXECUTABLES);
    else
-      RARCH_LOG("Start [%s] found in retroarch.cfg.\n", libretro_path);
+      RARCH_LOG("Start [%s] found in retroarch.cfg.\n", s);
 
    if (!config_file_exists)
    {
@@ -136,8 +139,8 @@ static void salamander_init(char *libretro_path, size_t sizeof_libretro_path)
 
       if (conf)
       {
-         config_set_string(conf, "libretro_path", libretro_path);
-         config_file_write(conf, g_defaults.config_path);
+         config_set_string(conf, "libretro_path", s);
+         config_file_write(conf, g_defaults.path.config);
          config_file_free(conf);
       }
    }

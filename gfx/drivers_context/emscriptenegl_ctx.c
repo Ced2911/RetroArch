@@ -14,29 +14,20 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../../driver.h"
-#include "../../runloop.h"
-#include "../video_context_driver.h"
-#include "../drivers/gl_common.h"
-#include "../video_monitor.h"
-
-#ifdef HAVE_CONFIG_H
-#include "../../config.h"
-#endif
-
 #include <stdint.h>
 #include <unistd.h>
 
 #include <emscripten/emscripten.h>
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
 
-static EGLContext g_egl_ctx;
-static EGLSurface g_egl_surf;
-static EGLDisplay g_egl_dpy;
-static EGLConfig g_egl_config;
+#include "../../driver.h"
+#include "../../runloop.h"
+#include "../video_context_driver.h"
+#include "../common/egl_common.h"
+#include "../common/gl_common.h"
 
-static bool g_inited;
+#ifdef HAVE_CONFIG_H
+#include "../../config.h"
+#endif
 
 static unsigned g_fb_width;
 static unsigned g_fb_height;
@@ -72,8 +63,10 @@ static void gfx_ctx_emscripten_check_window(void *data, bool *quit,
 static void gfx_ctx_emscripten_swap_buffers(void *data)
 {
    (void)data;
-   // no-op in emscripten, no way to force swap/wait for VSync in browsers
-   //eglSwapBuffers(g_egl_dpy, g_egl_surf);
+   /* no-op in emscripten, no way to force swap/wait for VSync in browsers */
+#if 0
+   egl_swap_buffers(data);
+#endif
 }
 
 static void gfx_ctx_emscripten_set_resize(void *data,
@@ -86,7 +79,8 @@ static void gfx_ctx_emscripten_set_resize(void *data,
 
 static void gfx_ctx_emscripten_update_window_title(void *data)
 {
-   char buf[128], buf_fps[128];
+   char buf[128]        = {0};
+   char buf_fps[128]    = {0};
    settings_t *settings = config_get_ptr();
 
    (void)data;
@@ -94,7 +88,7 @@ static void gfx_ctx_emscripten_update_window_title(void *data)
    video_monitor_get_fps(buf, sizeof(buf),
          buf_fps, sizeof(buf_fps));
    if (settings->fps_show)
-      rarch_main_msg_queue_push(buf_fps, 1, 1, false);
+      runloop_msg_queue_push(buf_fps, 1, 1, false);
 }
 
 static void gfx_ctx_emscripten_get_video_size(void *data,
@@ -109,7 +103,7 @@ static void gfx_ctx_emscripten_destroy(void *data);
 
 static bool gfx_ctx_emscripten_init(void *data)
 {
-   EGLint width, height, num_config;
+   EGLint width, height, n, major, minor;
    static const EGLint attribute_list[] =
    {
       EGL_RED_SIZE, 8,
@@ -127,39 +121,26 @@ static bool gfx_ctx_emscripten_init(void *data)
 
    (void)data;
 
-   RARCH_LOG("[EMSCRIPTEN/EGL]: Initializing...\n");
-
-   if (g_inited)
+   if (g_egl_inited)
    {
       RARCH_LOG("[EMSCRIPTEN/EGL]: Attempted to re-initialize driver.\n");
       return true;
    }
 
-   /* Get an EGL display connection. */
-   g_egl_dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-   if (!g_egl_dpy)
+   if (!egl_init_context(EGL_DEFAULT_DISPLAY, &major, &minor,
+            &n, attribute_list))
+   {
+      egl_report_error();
       goto error;
+   }
 
-   /* Initialize the EGL display connection. */
-   if (!eglInitialize(g_egl_dpy, NULL, NULL))
+   if (!egl_create_context(context_attributes))
+   {
+      egl_report_error();
       goto error;
+   }
 
-   /* Get an appropriate EGL frame buffer configuration. */
-   if (!eglChooseConfig(g_egl_dpy, attribute_list, &g_egl_config, 1, &num_config))
-      goto error;
-
-   /* Create an EGL rendering context. */
-   g_egl_ctx = eglCreateContext(g_egl_dpy, g_egl_config, EGL_NO_CONTEXT, context_attributes);
-   if (!g_egl_ctx)
-      goto error;
-
-   /* create an EGL window surface. */
-   g_egl_surf = eglCreateWindowSurface(g_egl_dpy, g_egl_config, 0, NULL);
-   if (!g_egl_surf)
-      goto error;
-
-   /* Connect the context to the surface. */
-   if (!eglMakeCurrent(g_egl_dpy, g_egl_surf, g_egl_surf, g_egl_ctx))
+   if (!egl_create_surface(0))
       goto error;
 
    eglQuerySurface(g_egl_dpy, g_egl_surf, EGL_WIDTH, &width);
@@ -181,10 +162,10 @@ static bool gfx_ctx_emscripten_set_video_mode(void *data,
 {
    (void)data;
 
-   if (g_inited)
+   if (g_egl_inited)
       return false;
 
-   g_inited = true;
+   g_egl_inited = true;
    return true;
 }
 
@@ -208,27 +189,7 @@ static bool gfx_ctx_emscripten_bind_api(void *data,
 
 static void gfx_ctx_emscripten_destroy(void *data)
 {
-   (void)data;
-
-   if (g_egl_dpy)
-   {
-      eglMakeCurrent(g_egl_dpy, EGL_NO_SURFACE,
-            EGL_NO_SURFACE, EGL_NO_CONTEXT);
-
-      if (g_egl_ctx)
-         eglDestroyContext(g_egl_dpy, g_egl_ctx);
-
-      if (g_egl_surf)
-         eglDestroySurface(g_egl_dpy, g_egl_surf);
-
-      eglTerminate(g_egl_dpy);
-   }
-
-   g_egl_ctx      = NULL;
-   g_egl_surf     = NULL;
-   g_egl_dpy      = NULL;
-   g_egl_config   = 0;
-   g_inited       = false;
+   egl_destroy(data);
 }
 
 static void gfx_ctx_emscripten_input_driver(void *data,
@@ -253,7 +214,7 @@ static bool gfx_ctx_emscripten_has_focus(void *data)
 {
    (void)data;
 
-   return g_inited;
+   return g_egl_inited;
 }
 
 static bool gfx_ctx_emscripten_suppress_screensaver(void *data, bool enable)
@@ -270,11 +231,6 @@ static bool gfx_ctx_emscripten_has_windowed(void *data)
 
    /* TODO -verify. */
    return true;
-}
-
-static gfx_ctx_proc_t gfx_ctx_emscripten_get_proc_address(const char *symbol)
-{
-   return eglGetProcAddress(symbol);
 }
 
 static float gfx_ctx_emscripten_translate_aspect(void *data,
@@ -321,9 +277,10 @@ const gfx_ctx_driver_t gfx_ctx_emscripten = {
    gfx_ctx_emscripten_has_windowed,
    gfx_ctx_emscripten_swap_buffers,
    gfx_ctx_emscripten_input_driver,
-   gfx_ctx_emscripten_get_proc_address,
+   egl_get_proc_address,
    gfx_ctx_emscripten_init_egl_image_buffer,
    gfx_ctx_emscripten_write_egl_image,
    NULL,
    "emscripten",
+   egl_bind_hw_render,
 };

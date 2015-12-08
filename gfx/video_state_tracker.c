@@ -19,7 +19,8 @@
 #include <compat/strl.h>
 #include <retro_inline.h>
 #include "../general.h"
-#include "../input/input_common.h"
+#include "../input/input_config.h"
+#include "../verbosity.h"
 
 #ifdef HAVE_PYTHON
 #include "video_state_python.h"
@@ -249,6 +250,21 @@ static void state_tracker_update_element(
    }
 }
 
+static const unsigned buttons[] = {
+   RETRO_DEVICE_ID_JOYPAD_R,
+   RETRO_DEVICE_ID_JOYPAD_L,
+   RETRO_DEVICE_ID_JOYPAD_X,
+   RETRO_DEVICE_ID_JOYPAD_A,
+   RETRO_DEVICE_ID_JOYPAD_RIGHT,
+   RETRO_DEVICE_ID_JOYPAD_LEFT,
+   RETRO_DEVICE_ID_JOYPAD_DOWN,
+   RETRO_DEVICE_ID_JOYPAD_UP,
+   RETRO_DEVICE_ID_JOYPAD_START,
+   RETRO_DEVICE_ID_JOYPAD_SELECT,
+   RETRO_DEVICE_ID_JOYPAD_Y,
+   RETRO_DEVICE_ID_JOYPAD_B,
+};
+
 /**
  * state_tracker_update_input:
  * @tracker                      : State tracker handle.
@@ -258,33 +274,13 @@ static void state_tracker_update_element(
 static void state_tracker_update_input(state_tracker_t *tracker)
 {
    unsigned i;
-   uint16_t state[2] = {0};
+   const struct retro_keybind *binds[MAX_USERS];
    settings_t *settings = config_get_ptr();
-
-   static const unsigned buttons[] = {
-      RETRO_DEVICE_ID_JOYPAD_R,
-      RETRO_DEVICE_ID_JOYPAD_L,
-      RETRO_DEVICE_ID_JOYPAD_X,
-      RETRO_DEVICE_ID_JOYPAD_A,
-      RETRO_DEVICE_ID_JOYPAD_RIGHT,
-      RETRO_DEVICE_ID_JOYPAD_LEFT,
-      RETRO_DEVICE_ID_JOYPAD_DOWN,
-      RETRO_DEVICE_ID_JOYPAD_UP,
-      RETRO_DEVICE_ID_JOYPAD_START,
-      RETRO_DEVICE_ID_JOYPAD_SELECT,
-      RETRO_DEVICE_ID_JOYPAD_Y,
-      RETRO_DEVICE_ID_JOYPAD_B,
-   };
+   uint16_t state[2]    = {0};
 
    /* Only bind for up to two players for now. */
-   const struct retro_keybind *binds[2] = {
-      settings->input.binds[0],
-      settings->input.binds[1],
-   };
-   driver_t *driver = driver_get_ptr();
-
-   if (!driver->input)
-      return;
+   for (i = 0; i < MAX_USERS; i++)
+      binds[i] = settings->input.binds[i];
 
    for (i = 0; i < 2; i++)
       input_push_analog_dpad(settings->input.binds[i],
@@ -293,7 +289,7 @@ static void state_tracker_update_input(state_tracker_t *tracker)
       input_push_analog_dpad(settings->input.autoconf_binds[i],
             settings->input.analog_dpad_mode[i]);
 
-   if (!driver->block_libretro_input)
+   if (!input_driver_ctl(RARCH_INPUT_CTL_IS_LIBRETRO_INPUT_BLOCKED, NULL))
    {
       for (i = 4; i < 16; i++)
       {

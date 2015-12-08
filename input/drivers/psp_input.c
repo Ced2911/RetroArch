@@ -1,7 +1,7 @@
 /*  RetroArch - A frontend for libretro.
  *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
  *  Copyright (C) 2011-2015 - Daniel De Matteis
- * 
+ *
  *  RetroArch is free software: you can redistribute it and/or modify it under the terms
  *  of the GNU General Public License as published by the Free Software Found-
  *  ation, either version 3 of the License, or (at your option) any later version.
@@ -17,30 +17,37 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include <boolean.h>
+
 #if defined(SN_TARGET_PSP2)
 #include <sceerror.h>
 #include <kernel.h>
 #include <ctrl.h>
+#elif defined(VITA)
+#include <psp2/ctrl.h>
 #elif defined(PSP)
 #include <pspctrl.h>
 #endif
 
-#include "../../gfx/drivers/psp_sdk_defines.h"
+#include "../../defines/psp_defines.h"
 
 #include "../../driver.h"
 #include "../../libretro.h"
 #include "../../general.h"
-#include "../input_common.h"
+#include "../input_config.h"
 #ifdef HAVE_KERNEL_PRX
-#include "../../psp1/kernel_functions.h"
+#include "../../bootstrap/psp1/kernel_functions.h"
 #endif
 
 #define MAX_PADS 1
 
 typedef struct psp_input
 {
+   bool blocked;
    const input_device_driver_t *joypad;
 } psp_input_t;
+
+uint64_t lifecycle_state;
 
 static void psp_input_poll(void *data)
 {
@@ -86,8 +93,9 @@ static void* psp_input_initialize(void)
    psp_input_t *psp = (psp_input_t*)calloc(1, sizeof(*psp));
    if (!psp)
       return NULL;
-   
-   psp->joypad = input_joypad_init_driver(settings->input.joypad_driver);   
+
+   psp->joypad = input_joypad_init_driver(
+         settings->input.joypad_driver, psp);
 
    return psp;
 }
@@ -95,11 +103,17 @@ static void* psp_input_initialize(void)
 static bool psp_input_key_pressed(void *data, int key)
 {
    settings_t *settings = config_get_ptr();
-   global_t   *global   = global_get_ptr();
    psp_input_t *psp     = (psp_input_t*)data;
 
-   return (global->lifecycle_state & (1ULL << key)) || 
-      input_joypad_pressed(psp->joypad, 0, settings->input.binds[0], key);
+   if (input_joypad_pressed(psp->joypad, 0, settings->input.binds[0], key))
+      return true;
+
+   return false;
+}
+
+static bool psp_input_meta_key_pressed(void *data, int key)
+{
+   return (BIT64_GET(lifecycle_state, key));
 }
 
 static uint64_t psp_input_get_capabilities(void *data)
@@ -134,18 +148,43 @@ static bool psp_input_set_rumble(void *data, unsigned port,
    return false;
 }
 
+static bool psp_input_keyboard_mapping_is_blocked(void *data)
+{
+   psp_input_t *psp = (psp_input_t*)data;
+   if (!psp)
+      return false;
+   return psp->blocked;
+}
+
+static void psp_input_keyboard_mapping_set_block(void *data, bool value)
+{
+   psp_input_t *psp = (psp_input_t*)data;
+   if (!psp)
+      return;
+   psp->blocked = value;
+}
+
 input_driver_t input_psp = {
    psp_input_initialize,
    psp_input_poll,
    psp_input_state,
    psp_input_key_pressed,
+   psp_input_meta_key_pressed,
    psp_input_free_input,
    NULL,
    NULL,
    psp_input_get_capabilities,
+#ifdef VITA
+   "vita",
+#else
    "psp",
+#endif
 
    psp_input_grab_mouse,
+   NULL,
    psp_input_set_rumble,
    psp_input_get_joypad_driver,
+   NULL,
+   psp_input_keyboard_mapping_is_blocked,
+   psp_input_keyboard_mapping_set_block,
 };

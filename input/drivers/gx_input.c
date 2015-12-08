@@ -16,23 +16,25 @@
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846264338327
-#endif
+#include <boolean.h>
+#include <retro_miscellaneous.h>
 
 #include "../../driver.h"
 #include "../../libretro.h"
-#include <stdlib.h>
 
 #ifndef MAX_PADS
 #define MAX_PADS 4
 #endif
 
+uint64_t lifecycle_state;
+
 typedef struct gx_input
 {
+   bool blocked;
    const input_device_driver_t *joypad;
 } gx_input_t;
 
@@ -75,7 +77,7 @@ static void *gx_input_init(void)
    if (!gx)
       return NULL;
 
-   gx->joypad = input_joypad_init_driver(settings->input.joypad_driver);
+   gx->joypad = input_joypad_init_driver(settings->input.joypad_driver, gx);
 
    return gx;
 }
@@ -91,10 +93,20 @@ static void gx_input_poll(void *data)
 static bool gx_input_key_pressed(void *data, int key)
 {
    settings_t *settings = config_get_ptr();
-   global_t   *global   = global_get_ptr();
    gx_input_t *gx       = (gx_input_t*)data;
-   return (global->lifecycle_state & (1ULL << key)) || 
-      input_joypad_pressed(gx->joypad, 0, settings->input.binds[0], key);
+
+   if (input_joypad_pressed(gx->joypad, 0, settings->input.binds[0], key))
+      return true;
+
+   return false;
+}
+
+static bool gx_input_meta_key_pressed(void *data, int key)
+{
+   if (BIT64_GET(lifecycle_state, key))
+      return true;
+
+   return false;
 }
 
 static uint64_t gx_input_get_capabilities(void *data)
@@ -129,11 +141,28 @@ static bool gx_input_set_rumble(void *data, unsigned port,
    return false;
 }
 
+static bool gx_input_keyboard_mapping_is_blocked(void *data)
+{
+   gx_input_t *gx = (gx_input_t*)data;
+   if (!gx)
+      return false;
+   return gx->blocked;
+}
+
+static void gx_input_keyboard_mapping_set_block(void *data, bool value)
+{
+   gx_input_t *gx = (gx_input_t*)data;
+   if (!gx)
+      return;
+   gx->blocked = value;
+}
+
 input_driver_t input_gx = {
    gx_input_init,
    gx_input_poll,
    gx_input_state,
    gx_input_key_pressed,
+   gx_input_meta_key_pressed,
    gx_input_free_input,
    NULL,
    NULL,
@@ -141,6 +170,10 @@ input_driver_t input_gx = {
    "gx",
 
    gx_input_grab_mouse,
+   NULL,
    gx_input_set_rumble,
    gx_input_get_joypad_driver,
+   NULL,
+   gx_input_keyboard_mapping_is_blocked,
+   gx_input_keyboard_mapping_set_block,
 };

@@ -1,7 +1,13 @@
+HAVE_FILE_LOGGER=1
+MISSING_DECLS   =0
+
+ifneq ($(C90_BUILD),)
+   C89_BUILD=1
+endif
+
 include config.mk
 
 TARGET = retroarch
-JTARGET = tools/retroarch-joyconfig 
 
 OBJDIR := obj-unix
 
@@ -10,7 +16,6 @@ ifeq ($(GLOBAL_CONFIG_DIR),)
 endif
 
 OBJ := 
-JOYCONFIG_OBJ :=
 LIBS :=
 DEFINES := -DHAVE_CONFIG_H -DRARCH_INTERNAL -DHAVE_OVERLAY
 DEFINES += -DGLOBAL_CONFIG_DIR='"$(GLOBAL_CONFIG_DIR)"'
@@ -21,7 +26,15 @@ endif
 
 include Makefile.common
 
+ifeq ($(shell $(CC) -v 2>&1 | grep -c "clang"),1)
+   DEFINES +=  -Wno-invalid-source-encoding
+endif
+
 HEADERS = $(wildcard */*/*.h) $(wildcard */*.h) $(wildcard *.h)
+
+ifeq ($(MISSING_DECLS), 1)
+	DEFINES += -Werror=missing-declarations
+endif
 
 ifeq ($(HAVE_DYLIB), 1)
    LIBS += $(DYLIB_LIB)
@@ -37,13 +50,17 @@ ifneq ($(V),1)
    Q := @
 endif
 
-OPTIMIZE_FLAG = -O3 -ffast-math
 ifeq ($(DEBUG), 1)
-   OPTIMIZE_FLAG = -O0
+   OPTIMIZE_FLAG = -O0 -g
+else
+   OPTIMIZE_FLAG = -O3 -ffast-math
+ifneq ($(findstring Win32,$(OS)),)
+   LDFLAGS += -mwindows
+endif
 endif
 
 CFLAGS   += -Wall $(OPTIMIZE_FLAG) $(INCLUDE_DIRS) $(DEBUG_FLAG) -I.
-CXXFLAGS := $(CFLAGS) -std=c++0x -D__STDC_CONSTANT_MACROS
+CXXFLAGS := $(CFLAGS) -std=c++98 -D__STDC_CONSTANT_MACROS
 OBJCFLAGS :=  $(CFLAGS) -D__STDC_CONSTANT_MACROS
 
 ifeq ($(CXX_BUILD), 1)
@@ -64,6 +81,10 @@ else
          CFLAGS += -std=gnu99 -D_GNU_SOURCE
       endif
    endif
+
+   ifneq ($(C89_BUILD),)
+      CFLAGS += -std=c89 -ansi -pedantic -Werror=pedantic -Wno-long-long
+   endif
 endif
 
 ifeq ($(NOUNUSED), yes)
@@ -76,11 +97,23 @@ ifeq ($(NOUNUSED_VARIABLE), yes)
 endif
 
 RARCH_OBJ := $(addprefix $(OBJDIR)/,$(OBJ))
-RARCH_JOYCONFIG_OBJ := $(addprefix $(OBJDIR)/,$(JOYCONFIG_OBJ))
 
-all: $(TARGET) $(JTARGET) config.mk
+ifneq ($(SANITIZER),)
+    CFLAGS   := -fsanitize=$(SANITIZER) $(CFLAGS)
+    CXXFLAGS := -fsanitize=$(SANITIZER) $(CXXFLAGS)
+    LDFLAGS  := -fsanitize=$(SANITIZER) $(LDLAGS)
+endif
 
--include $(RARCH_OBJ:.o=.d) $(RARCH_JOYCONFIG_OBJ:.o=.d)
+ifneq ($(findstring $(GPERFTOOLS),profiler),)
+   LIBS += -lprofiler
+endif
+ifneq ($(findstring $(GPERFTOOLS),tcmalloc),)
+   LIBS += -ltcmalloc
+endif
+
+all: $(TARGET) config.mk
+
+-include $(RARCH_OBJ:.o=.d)
 config.mk: configure qb/*
 	@echo "config.mk is outdated or non-existing. Run ./configure again."
 	@exit 1
@@ -88,10 +121,6 @@ config.mk: configure qb/*
 retroarch: $(RARCH_OBJ)
 	@$(if $(Q), $(shell echo echo LD $@),)
 	$(Q)$(LINK) -o $@ $(RARCH_OBJ) $(LIBS) $(LDFLAGS) $(LIBRARY_DIRS)
-
-$(JTARGET): $(RARCH_JOYCONFIG_OBJ)
-	@$(if $(Q), $(shell echo echo LD $@),)
-	$(Q)$(LINK) -o $@ $(RARCH_JOYCONFIG_OBJ) $(JOYCONFIG_LIBS) $(LDFLAGS) $(LIBRARY_DIRS)
 
 $(OBJDIR)/%.o: %.c config.h config.mk
 	@mkdir -p $(dir $@)
@@ -115,21 +144,6 @@ $(OBJDIR)/git_version.o: git_version.c .FORCE
 	@$(if $(Q), $(shell echo echo CC $<),)
 	$(Q)$(CC) $(CFLAGS) $(DEFINES) -MMD -c -o $@ $<
 
-$(OBJDIR)/tools/linuxraw_joypad.o: input/linuxraw_joypad.c
-	@mkdir -p $(dir $@)
-	@$(if $(Q), $(shell echo echo CC $<),)
-	$(Q)$(CC) $(CFLAGS) $(DEFINES) -MMD -DIS_JOYCONFIG -c -o $@ $<
-
-$(OBJDIR)/tools/parport_joypad.o: input/parport_joypad.c
-	@mkdir -p $(dir $@)
-	@$(if $(Q), $(shell echo echo CC $<),)
-	$(Q)$(CC) $(CFLAGS) $(DEFINES) -MMD -DIS_JOYCONFIG -c -o $@ $<
-
-$(OBJDIR)/tools/udev_joypad.o: input/udev_joypad.c
-	@mkdir -p $(dir $@)
-	@$(if $(Q), $(shell echo echo CC $<),)
-	$(Q)$(CC) $(CFLAGS) $(DEFINES) -MMD -DIS_JOYCONFIG -c -o $@ $<
-
 $(OBJDIR)/%.o: %.S config.h config.mk $(HEADERS)
 	@mkdir -p $(dir $@)
 	@$(if $(Q), $(shell echo echo AS $<),)
@@ -144,33 +158,29 @@ install: $(TARGET)
 	rm -f $(OBJDIR)/git_version.o
 	mkdir -p $(DESTDIR)$(PREFIX)/bin 2>/dev/null || /bin/true
 	mkdir -p $(DESTDIR)$(GLOBAL_CONFIG_DIR) 2>/dev/null || /bin/true
-	mkdir -p $(DESTDIR)$(PREFIX)/share/man/man1 2>/dev/null || /bin/true
+	mkdir -p $(DESTDIR)$(PREFIX)/share/applications 2>/dev/null || /bin/true
+	mkdir -p $(DESTDIR)$(MAN_DIR) 2>/dev/null || /bin/true
 	mkdir -p $(DESTDIR)$(PREFIX)/share/pixmaps 2>/dev/null || /bin/true
 	install -m755 $(TARGET) $(DESTDIR)$(PREFIX)/bin 
 	install -m755 tools/cg2glsl.py $(DESTDIR)$(PREFIX)/bin/retroarch-cg2glsl
-	install -m755 $(JTARGET) $(DESTDIR)$(PREFIX)/bin
 	install -m644 retroarch.cfg $(DESTDIR)$(GLOBAL_CONFIG_DIR)/retroarch.cfg
+	install -m644 retroarch.desktop $(DESTDIR)$(PREFIX)/share/applications
 	install -m644 docs/retroarch.1 $(DESTDIR)$(MAN_DIR)
 	install -m644 docs/retroarch-cg2glsl.1 $(DESTDIR)$(MAN_DIR)
-	install -m644 docs/retroarch-joyconfig.1 $(DESTDIR)$(MAN_DIR)
-	install -m644 media/retroarch.png $(DESTDIR)$(PREFIX)/share/pixmaps
 	install -m644 media/retroarch.svg $(DESTDIR)$(PREFIX)/share/pixmaps
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/retroarch
-	rm -f $(DESTDIR)$(PREFIX)/bin/retroarch-joyconfig
 	rm -f $(DESTDIR)$(PREFIX)/bin/retroarch-cg2glsl
 	rm -f $(DESTDIR)$(GLOBAL_CONFIG_DIR)/retroarch.cfg
-	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/retroarch.1
-	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/retroarch-cg2glsl.1
-	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/retroarch-joyconfig.1
-	rm -f $(DESTDIR)$(PREFIX)/share/pixmaps/retroarch.png
+	rm -f $(DESTDIR)$(PREFIX)/share/applications/retroarch.desktop
+	rm -f $(DESTDIR)$(MAN_DIR)/retroarch.1
+	rm -f $(DESTDIR)$(MAN_DIR)/retroarch-cg2glsl.1
 	rm -f $(DESTDIR)$(PREFIX)/share/pixmaps/retroarch.svg
 
 clean:
 	rm -rf $(OBJDIR)
 	rm -f $(TARGET)
-	rm -f $(JTARGET)
 	rm -f *.d
 
 .PHONY: all install uninstall clean

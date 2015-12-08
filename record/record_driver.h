@@ -149,6 +149,8 @@ void recording_dump_frame(const void *data, unsigned width,
 
 bool recording_deinit(void);
 
+void find_record_driver(void);
+
 /**
  * recording_init:
  *
@@ -157,6 +159,18 @@ bool recording_deinit(void);
  * Returns: true (1) if successful, otherwise false (0).
  **/
 bool recording_init(void);
+
+bool *recording_is_enabled(void);
+
+void recording_set_state(bool state);
+
+void recording_push_audio(const int16_t *data, size_t samples);
+
+void *recording_driver_get_data_ptr(void);
+
+void recording_driver_clear_data_ptr(void);
+
+void recording_driver_set_data_ptr(void *data);
 
 #ifdef __cplusplus
 }

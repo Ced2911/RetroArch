@@ -14,7 +14,7 @@
  */
 
 /* Test module to check re-entrancy of libretro implementations.
- * Reruns RetroArch main loop with all content defined on command-line
+ * Reruns the program's main loop with all content defined on command-line
  * to check if libretro can load multiple content after each other.
  */
 
@@ -36,7 +36,7 @@ int main(int argc, char *argv[])
             (argc - optind - 1) * sizeof(char*));
       argc--;
 
-      rarch_main_clear_state();
+      runloop_ctl(RUNLOOP_CTL_CLEAR_STATE);
    }
 }
 

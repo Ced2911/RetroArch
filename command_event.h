@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 #include <boolean.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,6 +31,12 @@ enum event_command
    /* Loads content file. */
    EVENT_CMD_LOAD_CONTENT,
    EVENT_CMD_LOAD_CONTENT_PERSIST,
+#ifdef HAVE_FFMPEG
+   EVENT_CMD_LOAD_CONTENT_FFMPEG,
+#endif
+   EVENT_CMD_LOAD_CONTENT_IMAGEVIEWER,
+   EVENT_CMD_SET_PER_GAME_RESOLUTION,
+   EVENT_CMD_SET_FRAME_LIMIT,
    /* Loads core. */
    EVENT_CMD_LOAD_CORE_DEINIT,
    EVENT_CMD_LOAD_CORE,
@@ -37,10 +44,10 @@ enum event_command
    EVENT_CMD_UNLOAD_CORE,
    EVENT_CMD_LOAD_STATE,
    EVENT_CMD_SAVE_STATE,
+   EVENT_CMD_SAVE_STATE_DECREMENT,
+   EVENT_CMD_SAVE_STATE_INCREMENT,
    /* Takes screenshot. */
    EVENT_CMD_TAKE_SCREENSHOT,
-   /* Initializes dummy core. */
-   EVENT_CMD_PREPARE_DUMMY,
    /* Quits RetroArch. */
    EVENT_CMD_QUIT,
    /* Reinitialize all drivers. */
@@ -111,6 +118,8 @@ enum event_command
    EVENT_CMD_RESTART_RETROARCH,
    /* Force-quit RetroArch. */
    EVENT_CMD_QUIT_RETROARCH,
+   /* Shutdown the OS */
+   EVENT_CMD_SHUTDOWN,
    /* Resume RetroArch when in menu. */
    EVENT_CMD_RESUME,
    /* Toggles pause. */
@@ -120,6 +129,7 @@ enum event_command
    /* Unpauses retroArch. */
    EVENT_CMD_PAUSE,
    EVENT_CMD_PAUSE_CHECKS,
+   EVENT_CMD_MENU_SAVE_CURRENT_CONFIG,
    EVENT_CMD_MENU_SAVE_CONFIG,
    EVENT_CMD_MENU_PAUSE_LIBRETRO,
    /* Toggles menu on/off. */
@@ -137,14 +147,12 @@ enum event_command
    EVENT_CMD_SAVEFILES_INIT,
    /* Deinitializes savefiles. */
    EVENT_CMD_SAVEFILES_DEINIT,
-   /* Initializes message queue. */
-   EVENT_CMD_MSG_QUEUE_INIT,
-   /* Deinitializes message queue. */
-   EVENT_CMD_MSG_QUEUE_DEINIT,
    /* Initializes cheats. */
    EVENT_CMD_CHEATS_INIT,
    /* Deinitializes cheats. */
    EVENT_CMD_CHEATS_DEINIT,
+   /* Apply cheats. */
+   EVENT_CMD_CHEATS_APPLY,
    /* Deinitializes network system. */
    EVENT_CMD_NETWORK_DEINIT,
    /* Initializes network system. */
@@ -163,6 +171,10 @@ enum event_command
    EVENT_CMD_COMMAND_INIT,
    /* Deinitialize command interface. */
    EVENT_CMD_COMMAND_DEINIT,
+   /* Initializes remote gamepad interface. */
+   EVENT_CMD_REMOTE_INIT,
+   /* Deinitializes remote gamepad interface. */
+   EVENT_CMD_REMOTE_DEINIT,
    /* Deinitializes drivers. */
    EVENT_CMD_DRIVERS_DEINIT,
    /* Initializes drivers. */
@@ -191,45 +203,8 @@ enum event_command
    EVENT_CMD_REMAPPING_INIT,
    EVENT_CMD_REMAPPING_DEINIT,
    EVENT_CMD_VOLUME_UP,
-   EVENT_CMD_VOLUME_DOWN,
-   EVENT_CMD_DATA_RUNLOOP_FREE,
+   EVENT_CMD_VOLUME_DOWN
 };
-
-typedef struct event_cmd_state
-{
-   bool fullscreen_toggle;
-   bool overlay_next_pressed;
-   bool grab_mouse_pressed;
-   bool menu_pressed;
-   bool quit_key_pressed;
-   bool screenshot_pressed;
-   bool mute_pressed;
-   bool osk_pressed;
-   bool volume_up_pressed;
-   bool volume_down_pressed;
-   bool reset_pressed;
-   bool disk_prev_pressed;
-   bool disk_next_pressed;
-   bool disk_eject_pressed;
-   bool movie_record;
-   bool save_state_pressed;
-   bool load_state_pressed;
-   bool slowmotion_pressed;
-   bool shader_next_pressed;
-   bool shader_prev_pressed;
-   bool fastforward_pressed;
-   bool hold_pressed;
-   bool old_hold_pressed;
-   bool state_slot_increase;
-   bool state_slot_decrease;
-   bool pause_pressed;
-   bool frameadvance_pressed;
-   bool rewind_pressed;
-   bool netplay_flip_pressed;
-   bool cheat_index_plus_pressed;
-   bool cheat_index_minus_pressed;
-   bool cheat_toggle_pressed;
-} event_cmd_state_t;
 
 /**
  * event_disk_control_append_image:

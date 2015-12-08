@@ -12,18 +12,20 @@
  *  You should have received a copy of the GNU General Public License along with RetroArch.
  *  If not, see <http://www.gnu.org/licenses/>.
  */
-
-#include "../input_autodetect.h"
-#include "../../general.h"
-#include <unistd.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 #include <limits.h>
 #include <errno.h>
+
 #include <linux/parport.h>
 #include <linux/ppdev.h>
 #include <sys/ioctl.h>
 #include <fcntl.h>
+
+#include "../input_autodetect.h"
+#include "../../general.h"
+#include "../../verbosity.h"
 
 /* Linux parport driver does not support reading the control register
    Other platforms may support up to 17 buttons */
@@ -223,21 +225,23 @@ static void parport_free_pad(struct parport_joypad *pad)
    pad->fd = -1;
 }
 
-static bool parport_joypad_init(void)
+static bool parport_joypad_init(void *data)
 {
    unsigned i, j;
-   bool found_enabled_button;
-   bool found_disabled_button;
-   char buf[PARPORT_NUM_BUTTONS * 3 + 1];
-   char pin[3 + 1];
-   settings_t *settings       = config_get_ptr();
-   autoconfig_params_t params = {{0}};
+   bool found_enabled_button             = false;
+   bool found_disabled_button            = false;
+   char buf[PARPORT_NUM_BUTTONS * 3 + 1] = {0};
+   char pin[3 + 1]                       = {0};
+   settings_t *settings                  = config_get_ptr();
+   autoconfig_params_t params            = {{0}};
+
+   (void)data;
 
    memset(buf, 0, PARPORT_NUM_BUTTONS * 3 + 1);
 
    for (i = 0; i < MAX_USERS; i++)
    {
-      char path[PATH_MAX_LENGTH];
+      char path[PATH_MAX_LENGTH] = {0};
       struct parport_joypad *pad = &parport_pads[i];
 
       pad->fd    = -1;
@@ -307,14 +311,14 @@ static bool parport_joypad_init(void)
 static void parport_joypad_destroy(void)
 {
    unsigned i;
-   struct parport_joypad *pad;
 
    for (i = 0; i < MAX_USERS; i++)
    {
-      pad = (struct parport_joypad*)&parport_pads[i];
+      struct parport_joypad *pad = (struct parport_joypad*)&parport_pads[i];
       if (pad->fd >= 0)
          parport_free_pad(pad);
    }
+
    memset(parport_pads, 0, sizeof(parport_pads));
    for (i = 0; i < MAX_USERS; i++)
       parport_pads[i].fd = -1;

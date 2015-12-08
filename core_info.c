@@ -15,12 +15,11 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "core_info.h"
-#include "general.h"
 #include <file/file_path.h>
-#include "file_ext.h"
 #include <file/file_extract.h>
-#include <file/dir_list.h>
+
+#include "general.h"
+#include "dir_list_special.h"
 #include "config.def.h"
 
 #ifdef HAVE_CONFIG_H
@@ -70,13 +69,14 @@ static void core_info_list_resolve_all_firmware(
 
    for (i = 0; i < core_info_list->count; i++)
    {
-      unsigned count    = 0;
-      core_info_t *info = (core_info_t*)&core_info_list->list[i];
+      unsigned count        = 0;
+      core_info_t *info     = (core_info_t*)&core_info_list->list[i];
+      config_file_t *config = info->config_data;
 
-      if (!info || !info->data)
+      if (!info || !config)
          continue;
 
-      if (!config_get_uint(info->data, "firmware_count", &count))
+      if (!config_get_uint(config, "firmware_count", &count))
          continue;
 
       info->firmware = (core_info_firmware_t*)
@@ -87,27 +87,99 @@ static void core_info_list_resolve_all_firmware(
 
       for (c = 0; c < count; c++)
       {
-         char path_key[64], desc_key[64], opt_key[64];
+         char path_key[64] = {0};
+         char desc_key[64] = {0};
+         char opt_key[64]  = {0};
 
          snprintf(path_key, sizeof(path_key), "firmware%u_path", c);
          snprintf(desc_key, sizeof(desc_key), "firmware%u_desc", c);
          snprintf(opt_key, sizeof(opt_key), "firmware%u_opt", c);
 
-         config_get_string(info->data, path_key, &info->firmware[c].path);
-         config_get_string(info->data, desc_key, &info->firmware[c].desc);
-         config_get_bool(info->data, opt_key , &info->firmware[c].optional);
+         config_get_string(config, path_key, &info->firmware[c].path);
+         config_get_string(config, desc_key, &info->firmware[c].desc);
+         config_get_bool(config, opt_key , &info->firmware[c].optional);
       }
    }
 }
 
-core_info_list_t *core_info_list_new(const char *modules_path)
+void core_info_get_name(const char *path, char *s, size_t len)
 {
    size_t i;
    core_info_t *core_info = NULL;
    core_info_list_t *core_info_list = NULL;
    settings_t *settings = config_get_ptr();
-   struct string_list *contents = (struct string_list*)
-      dir_list_new(modules_path, EXT_EXECUTABLES, false);
+   struct string_list *contents = dir_list_new_special(NULL, DIR_LIST_CORES, NULL);
+
+   if (!contents)
+      return;
+
+   core_info_list = (core_info_list_t*)calloc(1, sizeof(*core_info_list));
+   if (!core_info_list)
+      goto error;
+
+   core_info = (core_info_t*)calloc(contents->size, sizeof(*core_info));
+   if (!core_info)
+      goto error;
+
+   core_info_list->list = core_info;
+   core_info_list->count = contents->size;
+
+   for (i = 0; i < contents->size; i++)
+   {
+      config_file_t *conf                  = NULL;
+      char info_path_base[PATH_MAX_LENGTH] = {0};
+      char info_path[PATH_MAX_LENGTH]      = {0};
+
+      core_info[i].path = strdup(contents->elems[i].data);
+
+      if (!core_info[i].path)
+         break;
+
+      if (strcmp(core_info[i].path, path) != 0)
+            continue;
+
+      fill_pathname_base(info_path_base, contents->elems[i].data,
+            sizeof(info_path_base));
+      path_remove_extension(info_path_base);
+
+#if defined(RARCH_MOBILE) || (defined(RARCH_CONSOLE) && !defined(PSP))
+      char *substr = strrchr(info_path_base, '_');
+      if (substr)
+         *substr = '\0';
+#endif
+
+      strlcat(info_path_base, ".info", sizeof(info_path_base));
+
+      fill_pathname_join(info_path, (*settings->libretro_info_path) ?
+            settings->libretro_info_path : settings->libretro_directory,
+            info_path_base, sizeof(info_path));
+
+      conf = config_file_new(info_path);
+
+      if (conf)
+      {
+         config_get_string(conf, "corename",
+               &core_info[i].core_name);
+         core_info[i].config_data = (void*)conf;
+      }
+
+      strlcpy(s, core_info[i].core_name, len);
+   }
+
+error:
+   if (contents)
+      dir_list_free(contents);
+   contents = NULL;
+   core_info_list_free(core_info_list);
+}
+
+core_info_list_t *core_info_list_new(void)
+{
+   size_t i;
+   core_info_t *core_info = NULL;
+   core_info_list_t *core_info_list = NULL;
+   settings_t *settings = config_get_ptr();
+   struct string_list *contents = dir_list_new_special(NULL, DIR_LIST_CORES, NULL);
 
    if (!contents)
       return NULL;
@@ -125,7 +197,9 @@ core_info_list_t *core_info_list_new(const char *modules_path)
 
    for (i = 0; i < contents->size; i++)
    {
-      char info_path_base[PATH_MAX_LENGTH], info_path[PATH_MAX_LENGTH];
+      config_file_t *conf                  = NULL;
+      char info_path_base[PATH_MAX_LENGTH] = {0};
+      char info_path[PATH_MAX_LENGTH]      = {0};
       core_info[i].path = strdup(contents->elems[i].data);
 
       if (!core_info[i].path)
@@ -144,67 +218,69 @@ core_info_list_t *core_info_list_new(const char *modules_path)
       strlcat(info_path_base, ".info", sizeof(info_path_base));
 
       fill_pathname_join(info_path, (*settings->libretro_info_path) ?
-            settings->libretro_info_path : modules_path,
+            settings->libretro_info_path : settings->libretro_directory,
             info_path_base, sizeof(info_path));
 
-      core_info[i].data = config_file_new(info_path);
+      conf = config_file_new(info_path);
 
-      if (core_info[i].data)
+      if (conf)
       {
          unsigned count = 0;
-         config_get_string(core_info[i].data, "display_name",
+         config_get_string(conf, "display_name",
                &core_info[i].display_name);
-         config_get_string(core_info[i].data, "corename",
+         config_get_string(conf, "corename",
                &core_info[i].core_name);
-         config_get_string(core_info[i].data, "systemname",
+         config_get_string(conf, "systemname",
                &core_info[i].systemname);
-         config_get_string(core_info[i].data, "manufacturer",
+         config_get_string(conf, "manufacturer",
                &core_info[i].system_manufacturer);
-         config_get_uint(core_info[i].data, "firmware_count", &count);
+         config_get_uint(conf, "firmware_count", &count);
          core_info[i].firmware_count = count;
-         if (config_get_string(core_info[i].data, "supported_extensions",
+         if (config_get_string(conf, "supported_extensions",
                   &core_info[i].supported_extensions) &&
                core_info[i].supported_extensions)
             core_info[i].supported_extensions_list =
                string_split(core_info[i].supported_extensions, "|");
 
-         if (config_get_string(core_info[i].data, "authors",
+         if (config_get_string(conf, "authors",
                   &core_info[i].authors) &&
                core_info[i].authors)
             core_info[i].authors_list =
                string_split(core_info[i].authors, "|");
 
-         if (config_get_string(core_info[i].data, "permissions",
+         if (config_get_string(conf, "permissions",
                   &core_info[i].permissions) &&
                core_info[i].permissions)
             core_info[i].permissions_list =
                string_split(core_info[i].permissions, "|");
 
-         if (config_get_string(core_info[i].data, "license",
+         if (config_get_string(conf, "license",
                   &core_info[i].licenses) &&
                core_info[i].licenses)
             core_info[i].licenses_list =
                string_split(core_info[i].licenses, "|");
 
-         if (config_get_string(core_info[i].data, "categories",
+         if (config_get_string(conf, "categories",
                   &core_info[i].categories) &&
                core_info[i].categories)
             core_info[i].categories_list =
                string_split(core_info[i].categories, "|");
 
-         if (config_get_string(core_info[i].data, "database",
+         if (config_get_string(conf, "database",
                   &core_info[i].databases) &&
                core_info[i].databases)
             core_info[i].databases_list =
                string_split(core_info[i].databases, "|");
 
-         if (config_get_string(core_info[i].data, "notes",
+         if (config_get_string(conf, "notes",
                   &core_info[i].notes) &&
                core_info[i].notes)
             core_info[i].note_list = string_split(core_info[i].notes, "|");
 
-         config_get_bool(core_info[i].data, "supports_no_game",
+         config_get_bool(conf, "supports_no_game",
                &core_info[i].supports_no_game);
+
+         core_info[i].config_data = conf;
       }
 
       if (!core_info[i].display_name)
@@ -239,6 +315,7 @@ void core_info_list_free(core_info_list_t *core_info_list)
          continue;
 
       free(info->path);
+      free(info->core_name);
       free(info->systemname);
       free(info->system_manufacturer);
       free(info->display_name);
@@ -257,7 +334,7 @@ void core_info_list_free(core_info_list_t *core_info_list)
       string_list_free(info->licenses_list);
       string_list_free(info->categories_list);
       string_list_free(info->databases_list);
-      config_file_free(info->data);
+      config_file_free((config_file_t*)info->config_data);
 
       for (j = 0; j < info->firmware_count; j++)
       {
@@ -280,7 +357,10 @@ size_t core_info_list_num_info_files(core_info_list_t *core_info_list)
       return 0;
 
    for (i = 0; i < core_info_list->count; i++)
-      num += !!core_info_list->list[i].data;
+   {
+      config_file_t *conf = (config_file_t*)core_info_list->list[i].config_data;
+      num += !!conf;
+   }
 
    return num;
 }
@@ -304,6 +384,46 @@ bool core_info_list_get_display_name(core_info_list_t *core_info_list,
       }
    }
 
+   return false;
+}
+
+bool core_info_get_display_name(const char *path, char *s, size_t len)
+{
+   char       *core_name = NULL;
+   char       *display_name = NULL;
+   config_file_t *conf   = NULL;
+
+   if (!path_file_exists(path))
+      return false;
+
+   conf = config_file_new(path);
+
+   if (!conf)
+      goto error;
+
+   config_get_string(conf, "corename",
+         &core_name);
+
+   config_get_string(conf, "display_name",
+         &display_name);
+
+   config_file_free(conf);
+
+   if (!core_name)
+      goto error;
+   if (!conf)
+      goto error;
+
+   snprintf(s, len,"%s",display_name);
+
+   free(core_name);
+   free(display_name);
+
+   return true;
+
+error:
+   if (core_name)
+      free(core_name);
    return false;
 }
 
@@ -351,11 +471,13 @@ bool core_info_does_support_file(const core_info_t *core, const char *path)
          core->supported_extensions_list, ".", path_get_extension(path));
 }
 
-const char *core_info_list_get_all_extensions(core_info_list_t *core_info_list)
+const char *core_info_list_get_all_extensions(void)
 {
-   if (!core_info_list)
-      return "";
-   return core_info_list->all_ext;
+   global_t *global = global_get_ptr();
+   core_info_list_t *list = global ? global->core_info.list : NULL;
+   if (!list)
+      return NULL;
+   return list->all_ext;
 }
 
 /* qsort_r() is not in standard C, sadly. */
@@ -427,7 +549,7 @@ void core_info_list_get_supported_cores(core_info_list_t *core_info_list,
    *num_infos = supported;
 }
 
-static core_info_t *find_core_info(core_info_list_t *list,
+core_info_t *core_info_find(core_info_list_t *list,
       const char *core)
 {
    size_t i;
@@ -447,11 +569,24 @@ static core_info_t *find_core_info(core_info_list_t *list,
    return NULL;
 }
 
+core_info_t *core_info_get(core_info_list_t *list, size_t i)
+{
+   core_info_t *info = NULL;
+
+   if (!list)
+      return NULL;
+   info = (core_info_t*)&list->list[i];
+   if (!info || !info->path)
+      return NULL;
+
+   return info;
+}
+
 static int core_info_firmware_cmp(const void *a_, const void *b_)
 {
    const core_info_firmware_t *a = (const core_info_firmware_t*)a_;
    const core_info_firmware_t *b = (const core_info_firmware_t*)b_;
-   int order = b->missing - a->missing;
+   int                     order = b->missing - a->missing;
 
    if (order)
       return order;
@@ -462,13 +597,13 @@ void core_info_list_update_missing_firmware(core_info_list_t *core_info_list,
       const char *core, const char *systemdir)
 {
    size_t i;
-   char path[PATH_MAX_LENGTH];
-   core_info_t *info = NULL;
+   char path[PATH_MAX_LENGTH] = {0};
+   core_info_t          *info = NULL;
 
    if (!core_info_list || !core)
       return;
 
-   if (!(info = find_core_info(core_info_list, core)))
+   if (!(info = core_info_find(core_info_list, core)))
       return;
 
    for (i = 0; i < info->firmware_count; i++)
@@ -487,16 +622,16 @@ void core_info_list_get_missing_firmware(core_info_list_t *core_info_list,
       const core_info_firmware_t **firmware, size_t *num_firmware)
 {
    size_t i;
-   char path[PATH_MAX_LENGTH];
-   core_info_t *info = NULL;
+   char path[PATH_MAX_LENGTH] = {0};
+   core_info_t          *info = NULL;
 
    if (!core_info_list || !core)
       return;
 
-   *firmware = NULL;
+   *firmware     = NULL;
    *num_firmware = 0;
 
-   if (!(info = find_core_info(core_info_list, core)))
+   if (!(info = core_info_find(core_info_list, core)))
       return;
 
    *firmware = info->firmware;

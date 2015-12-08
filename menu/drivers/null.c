@@ -19,34 +19,44 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+
 #include "../menu_driver.h"
-#include "../menu.h"
+#include "../menu_display.h"
+
 #include "../../general.h"
 
 menu_ctx_driver_t menu_ctx_null = {
-  NULL, // set_texture
-  NULL, // render_messagebox
-  NULL, // render
-  NULL, // frame
-  NULL, // init
-  NULL, // free
-  NULL, // context_reset
-  NULL, // context_destroy
-  NULL, // populate_entries
-  NULL, // toggle
-  NULL, // navigation_clear
-  NULL, // navigation_decrement
-  NULL, // navigation_increment
-  NULL, // navigation_set
-  NULL, // navigation_set_last
-  NULL, // navigation_descend_alphabet
-  NULL, // navigation_ascend_alphabet
-  NULL, // list_insert
-  NULL, // list_delete
-  NULL, // list_clear
-  NULL, // list_cache
-  NULL, // list_set_selection
-  NULL,
-  NULL,
+  NULL,  /* set_texture */
+  NULL,  /* render_messagebox */
+  NULL,  /* iterate */
+  NULL,  /* render */
+  NULL,  /* frame */
+  NULL,  /* init */
+  NULL,  /* free */
+  NULL,  /* context_reset */
+  NULL,  /* context_destroy */
+  NULL,  /* populate_entries */
+  NULL,  /* toggle */
+  NULL,  /* navigation_clear */
+  NULL,  /* navigation_decrement */
+  NULL,  /* navigation_increment */
+  NULL,  /* navigation_set */
+  NULL,  /* navigation_set_last */
+  NULL,  /* navigation_descend_alphabet */
+  NULL,  /* navigation_ascend_alphabet */
+  NULL,  /* lists_init */
+  NULL,  /* list_insert */
+  NULL,  /* list_delete */
+  NULL,  /* list_clear */
+  NULL,  /* list_cache */
+  NULL,  /* list_push */
+  NULL,  /* list_get_selection */
+  NULL,  /* list_get_size */
+  NULL,  /* list_get_entry */
+  NULL,  /* list_set_selection */
+  NULL,  /* bind_init */
+  NULL,  /* load_image */
   "null",
+  NULL,
+  NULL,
 };

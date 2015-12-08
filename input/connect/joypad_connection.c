@@ -14,7 +14,11 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdlib.h>
 #include <string.h>
+
+#include "../input_config.h"
+
 #include "joypad_connection.h"
 
 int pad_connection_find_vacant_pad(joypad_connection_t *joyconn)
@@ -35,11 +39,11 @@ int pad_connection_find_vacant_pad(joypad_connection_t *joyconn)
    return -1;
 }
 
-void *pad_connection_init(unsigned pads)
+joypad_connection_t *pad_connection_init(unsigned pads)
 {
-   int i;
+   unsigned i;
    joypad_connection_t *joyconn = (joypad_connection_t*)
-      calloc(pads, sizeof(*joyconn));
+      calloc(pads, sizeof(joypad_connection_t));
 
    if (!joyconn)
       return NULL;
@@ -67,8 +71,7 @@ int32_t pad_connection_pad_init(joypad_connection_t *joyconn,
 
    if (pad != -1)
    {
-      unsigned i;
-      joypad_connection_t* s = (joypad_connection_t*)&joyconn[pad];
+      joypad_connection_t *s = (joypad_connection_t*)&joyconn[pad];
 
       static const struct
       {
@@ -89,9 +92,11 @@ int32_t pad_connection_pad_init(joypad_connection_t *joyconn,
 
       if (s)
       {
+         unsigned i;
+
          for (i = 0; name && pad_map[i].name; i++)
          {
-            char *name_match = strstr(name, pad_map[i].name);
+            const char *name_match = strstr(name, pad_map[i].name);
 
             if (name_match || (pad_map[i].vid == vid && pad_map[i].pid == pid))
             {
@@ -105,7 +110,7 @@ int32_t pad_connection_pad_init(joypad_connection_t *joyconn,
       }
    }
 
-   return -1;
+   return pad;
 }
 
 void pad_connection_pad_deinit(joypad_connection_t *joyconn, uint32_t pad)

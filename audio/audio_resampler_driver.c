@@ -21,7 +21,7 @@
 #include <file/config_file_userdata.h>
 #include <string.h>
 #ifndef DONT_HAVE_STRING_LIST
-#include <string/string_list.h>
+#include "../string_list_special.h"
 #endif
 
 static const rarch_resampler_t *resampler_drivers[] = {
@@ -99,39 +99,7 @@ const char *audio_resampler_driver_find_ident(int idx)
  **/
 const char* config_get_audio_resampler_driver_options(void)
 {
-   union string_list_elem_attr attr;
-   unsigned i;
-   char *options = NULL;
-   int options_len = 0;
-   struct string_list *options_l = string_list_new();
-
-   attr.i = 0;
-
-   if (!options_l)
-      return NULL;
-
-   for (i = 0; resampler_drivers[i]; i++)
-   {
-      const char *opt = resampler_drivers[i]->ident;
-      options_len += strlen(opt) + 1;
-      string_list_append(options_l, opt, attr);
-   }
-
-   options = (char*)calloc(options_len, sizeof(char));
-
-   if (!options)
-   {
-      options = NULL;
-      goto done;
-   }
-
-   string_list_join_concat(options, options_len, options_l, "|");
-
-done:
-   string_list_free(options_l);
-   options_l = NULL;
-
-   return options;
+   return char_list_new_special(STRING_LIST_AUDIO_RESAMPLER_DRIVERS, NULL);
 }
 #endif
 
@@ -146,20 +114,10 @@ done:
  **/
 static const rarch_resampler_t *find_resampler_driver(const char *ident)
 {
-   unsigned d;
    int i = find_resampler_driver_index(ident);
 
    if (i >= 0)
       return resampler_drivers[i];
-
-#ifdef RARCH_INTERNAL
-   RARCH_ERR("Couldn't find any resampler driver named \"%s\"\n", ident);
-   RARCH_LOG_OUTPUT("Available resampler drivers are:\n");
-   for (d = 0; resampler_drivers[d]; d++)
-      RARCH_LOG_OUTPUT("\t%s\n", resampler_drivers[d]->ident);
-
-   RARCH_WARN("Going to default to first resampler driver ...\n");
-#endif
 
    return resampler_drivers[0];
 }
@@ -167,7 +125,7 @@ static const rarch_resampler_t *find_resampler_driver(const char *ident)
 #ifndef RARCH_INTERNAL
 
 #ifdef __cplusplus
-extern "C" 
+extern "C" {
 #endif
 retro_get_cpu_features_t perf_get_cpu_features_cb;
 
@@ -180,7 +138,7 @@ retro_get_cpu_features_t perf_get_cpu_features_cb;
 static resampler_simd_mask_t resampler_get_cpu_features(void)
 {
 #ifdef RARCH_INTERNAL
-   return rarch_get_cpu_features();
+   return retro_get_cpu_features();
 #else
    return perf_get_cpu_features_cb();
 #endif

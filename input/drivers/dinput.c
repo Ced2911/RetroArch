@@ -1,7 +1,7 @@
 /*  RetroArch - A frontend for libretro.
  *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
  *  Copyright (C) 2011-2015 - Daniel De Matteis
- * 
+ *
  *  RetroArch is free software: you can redistribute it and/or modify it under the terms
  *  of the GNU General Public License as published by the Free Software Found-
  *  ation, either version 3 of the License, or (at your option) any later version.
@@ -27,17 +27,19 @@
 
 #include <dinput.h>
 
-#include "../../general.h"
-#include <boolean.h>
-#include "../input_autodetect.h"
-#include "../input_common.h"
-#include "../input_joypad.h"
-#include "../input_keymaps.h"
-#include "../../retroarch_logger.h"
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
+#include <boolean.h>
+
 #include <windowsx.h>
+
+#include "../../general.h"
+#include "../../verbosity.h"
+#include "../input_autodetect.h"
+#include "../input_config.h"
+#include "../input_joypad_driver.h"
+#include "../input_keymaps.h"
 
 /* Keep track of which pad indexes are 360 controllers.
  * Not static, will be read in xinput_joypad.c
@@ -60,15 +62,18 @@ struct pointer_status
 
 struct dinput_input
 {
+   bool blocked;
    LPDIRECTINPUTDEVICE8 keyboard;
    LPDIRECTINPUTDEVICE8 mouse;
    const input_device_driver_t *joypad;
    uint8_t state[256];
 
-   int mouse_rel_x;
-   int mouse_rel_y;
+   int window_pos_x;
+   int window_pos_y;
    int mouse_x;
+   int mouse_last_x;
    int mouse_y;
+   int mouse_last_y;
    bool mouse_l, mouse_r, mouse_m, mouse_wu, mouse_wd, mouse_hwu, mouse_hwd;
    struct pointer_status pointer_head;  /* dummy head for easier iteration */
 };
@@ -84,6 +89,7 @@ void dinput_destroy_context(void)
 
 bool dinput_init_context(void)
 {
+   bool context_initialized = false;
    if (g_dinput_ctx)
       return true;
 
@@ -91,26 +97,28 @@ bool dinput_init_context(void)
 
    /* Who said we shouldn't have same call signature in a COM API? <_< */
 #ifdef __cplusplus
-   if (FAILED(DirectInput8Create(
+   context_initialized = (SUCCEEDED(DirectInput8Create(
       GetModuleHandle(NULL), DIRECTINPUT_VERSION, IID_IDirectInput8,
-      (void**)&g_dinput_ctx, NULL)))
+      (void**)&g_dinput_ctx, NULL)));
 #else
-   if (FAILED(DirectInput8Create(
+   context_initialized = (SUCCEEDED(DirectInput8Create(
       GetModuleHandle(NULL), DIRECTINPUT_VERSION, &IID_IDirectInput8,
-      (void**)&g_dinput_ctx, NULL)))
+      (void**)&g_dinput_ctx, NULL)));
 #endif
-   {
-      RARCH_ERR("Failed to init DirectInput.\n");
-      return false;
-   }
+
+   if (!context_initialized)
+      goto error;
 
    return true;
+
+error:
+   RARCH_ERR("Failed to initialize DirectInput.\n");
+   return false;
 }
 
 static void *dinput_init(void)
 {
    struct dinput_input *di = NULL;
-   driver_t *driver     = driver_get_ptr();
    settings_t *settings = config_get_ptr();
 
    if (!dinput_init_context())
@@ -152,20 +160,23 @@ static void *dinput_init(void)
    {
       IDirectInputDevice8_SetDataFormat(di->keyboard, &c_dfDIKeyboard);
       IDirectInputDevice8_SetCooperativeLevel(di->keyboard,
-            (HWND)driver->video_window, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+            (HWND)video_driver_window_get(), DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
       IDirectInputDevice8_Acquire(di->keyboard);
    }
 
    if (di->mouse)
    {
-      IDirectInputDevice8_SetDataFormat(di->mouse, &c_dfDIMouse2);
-      IDirectInputDevice8_SetCooperativeLevel(di->mouse, (HWND)driver->video_window,
+      DIDATAFORMAT c_dfDIMouse2_custom = c_dfDIMouse2;
+
+      c_dfDIMouse2_custom.dwFlags = DIDF_ABSAXIS;
+      IDirectInputDevice8_SetDataFormat(di->mouse, &c_dfDIMouse2_custom);
+      IDirectInputDevice8_SetCooperativeLevel(di->mouse, (HWND)video_driver_window_get(),
             DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
       IDirectInputDevice8_Acquire(di->mouse);
    }
 
    input_keymaps_init_keyboard_lut(rarch_key_map_dinput);
-   di->joypad = input_joypad_init_driver(settings->input.joypad_driver);
+   di->joypad = input_joypad_init_driver(settings->input.joypad_driver, di);
 
    return di;
 }
@@ -173,7 +184,6 @@ static void *dinput_init(void)
 static void dinput_poll(void *data)
 {
    struct dinput_input *di = (struct dinput_input*)data;
-   driver_t *driver = driver_get_ptr();
 
    memset(di->state, 0, sizeof(di->state));
    if (di->keyboard)
@@ -202,17 +212,21 @@ static void dinput_poll(void *data)
             memset(&mouse_state, 0, sizeof(mouse_state));
       }
 
-      di->mouse_rel_x = mouse_state.lX;
-      di->mouse_rel_y = mouse_state.lY;
+      di->mouse_last_x = di->mouse_x;
+      di->mouse_last_y = di->mouse_y;
+
+      di->mouse_x = di->window_pos_x;
+      di->mouse_y = di->window_pos_y;
+
       di->mouse_l  = mouse_state.rgbButtons[0];
       di->mouse_r  = mouse_state.rgbButtons[1];
       di->mouse_m  = mouse_state.rgbButtons[2];
 
-      /* No simple way to get absolute coordinates 
+      /* No simple way to get absolute coordinates
        * for RETRO_DEVICE_POINTER. Just use Win32 APIs. */
       POINT point = {0};
       GetCursorPos(&point);
-      ScreenToClient((HWND)driver->video_window, &point);
+      ScreenToClient((HWND)video_driver_window_get(), &point);
       di->mouse_x = point.x;
       di->mouse_y = point.y;
    }
@@ -240,8 +254,12 @@ static bool dinput_is_pressed(struct dinput_input *di,
    if (id >= RARCH_BIND_LIST_END)
       return false;
 
-   return dinput_keyboard_pressed(di, bind->key) || 
-      input_joypad_pressed(di->joypad, port, binds, id);
+   if (!di->blocked && dinput_keyboard_pressed(di, bind->key))
+      return true;
+   if (input_joypad_pressed(di->joypad, port, binds, id))
+      return true;
+
+   return false;
 }
 
 static int16_t dinput_pressed_analog(struct dinput_input *di,
@@ -271,8 +289,12 @@ static int16_t dinput_pressed_analog(struct dinput_input *di,
 static bool dinput_key_pressed(void *data, int key)
 {
    settings_t *settings = config_get_ptr();
-   return dinput_is_pressed((struct dinput_input*)data,
-         settings->input.binds[0], 0, key);
+   return dinput_is_pressed((struct dinput_input*)data, settings->input.binds[0], 0, key);
+}
+
+static bool dinput_meta_key_pressed(void *data, int key)
+{
+   return false;
 }
 
 static int16_t dinput_lightgun_state(struct dinput_input *di, unsigned id)
@@ -280,9 +302,9 @@ static int16_t dinput_lightgun_state(struct dinput_input *di, unsigned id)
    switch (id)
    {
       case RETRO_DEVICE_ID_LIGHTGUN_X:
-         return di->mouse_rel_x;
+         return di->mouse_x - di->mouse_last_x;
       case RETRO_DEVICE_ID_LIGHTGUN_Y:
-         return di->mouse_rel_y;
+         return di->mouse_y - di->mouse_last_y;
       case RETRO_DEVICE_ID_LIGHTGUN_TRIGGER:
          return di->mouse_l;
       case RETRO_DEVICE_ID_LIGHTGUN_CURSOR:
@@ -290,9 +312,9 @@ static int16_t dinput_lightgun_state(struct dinput_input *di, unsigned id)
       case RETRO_DEVICE_ID_LIGHTGUN_TURBO:
          return di->mouse_r;
       case RETRO_DEVICE_ID_LIGHTGUN_START:
-         return di->mouse_m && di->mouse_r; 
+         return di->mouse_m && di->mouse_r;
       case RETRO_DEVICE_ID_LIGHTGUN_PAUSE:
-         return di->mouse_m && di->mouse_l; 
+         return di->mouse_m && di->mouse_l;
    }
 
    return 0;
@@ -305,9 +327,9 @@ static int16_t dinput_mouse_state(struct dinput_input *di, unsigned id)
    switch (id)
    {
       case RETRO_DEVICE_ID_MOUSE_X:
-         return di->mouse_rel_x;
+         return di->mouse_x - di->mouse_last_x;
       case RETRO_DEVICE_ID_MOUSE_Y:
-         return di->mouse_rel_y;
+         return di->mouse_y - di->mouse_last_y;
       case RETRO_DEVICE_ID_MOUSE_LEFT:
          return di->mouse_l;
       case RETRO_DEVICE_ID_MOUSE_RIGHT:
@@ -337,6 +359,21 @@ static int16_t dinput_mouse_state(struct dinput_input *di, unsigned id)
    }
 
    return 0;
+}
+
+static int16_t dinput_mouse_state_screen(struct dinput_input *di, unsigned id)
+{
+   switch (id)
+   {
+      case RETRO_DEVICE_ID_MOUSE_X:
+         return di->mouse_x;
+      case RETRO_DEVICE_ID_MOUSE_Y:
+         return di->mouse_y;
+      default:
+         break;
+   }
+
+   return dinput_mouse_state(di, id);
 }
 
 static int16_t dinput_pointer_state(struct dinput_input *di,
@@ -393,8 +430,10 @@ static int16_t dinput_pointer_state(struct dinput_input *di,
       case RETRO_DEVICE_ID_POINTER_PRESSED:
          return pointer_down;
       default:
-         return 0;
+         break;
    }
+
+   return 0;
 }
 
 static int16_t dinput_input_state(void *data,
@@ -422,6 +461,9 @@ static int16_t dinput_input_state(void *data,
 
       case RETRO_DEVICE_MOUSE:
          return dinput_mouse_state(di, id);
+
+      case RARCH_DEVICE_MOUSE_SCREEN:
+         return dinput_mouse_state_screen(di, id);
 
       case RETRO_DEVICE_POINTER:
       case RARCH_DEVICE_POINTER_SCREEN:
@@ -458,11 +500,10 @@ static void dinput_pointer_store_pos(
       struct pointer_status *pointer, WPARAM lParam)
 {
    POINT point;
-   driver_t *driver = driver_get_ptr();
 
    point.x = GET_X_LPARAM(lParam);
    point.y = GET_Y_LPARAM(lParam);
-   ScreenToClient((HWND)driver->video_window, &point);
+   ScreenToClient((HWND)video_driver_window_get(), &point);
    pointer->pointer_x = point.x;
    pointer->pointer_y = point.y;
 }
@@ -532,69 +573,73 @@ bool dinput_handle_message(void *dinput, UINT message, WPARAM wParam, LPARAM lPa
 {
    struct dinput_input *di = (struct dinput_input *)dinput;
    settings_t *settings    = config_get_ptr();
-   /* WM_POINTERDOWN   : Arrives for each new touch event 
+   /* WM_POINTERDOWN   : Arrives for each new touch event
     *                    with a new ID - add to list.
-    * WM_POINTERUP     : Arrives once the pointer is no 
+    * WM_POINTERUP     : Arrives once the pointer is no
     *                    longer down - remove from list.
-    * WM_POINTERUPDATE : arrives for both pressed and 
+    * WM_POINTERUPDATE : arrives for both pressed and
     *                    hovering pointers - ignore hovering
    */
 
    switch (message)
    {
-      case WM_POINTERDOWN:
-      {
-         struct pointer_status *new_pointer = 
-            (struct pointer_status *)malloc(sizeof(struct pointer_status));
-
-         if (!new_pointer)
-         {
-            RARCH_ERR("dinput_handle_message: pointer allocation in WM_POINTERDOWN failed.\n");
-            return false;
-         }
-
-         new_pointer->pointer_id = GET_POINTERID_WPARAM(wParam);
-         dinput_pointer_store_pos(new_pointer, lParam);
-         dinput_add_pointer(di, new_pointer);
-         return true;
-      }
-      case WM_POINTERUP:
-      {
-         int pointer_id = GET_POINTERID_WPARAM(wParam);
-         dinput_delete_pointer(di, pointer_id);
-         return true;
-      }
-      case WM_POINTERUPDATE:
-      {
-         int pointer_id = GET_POINTERID_WPARAM(wParam);
-         struct pointer_status *pointer = dinput_find_pointer(di, pointer_id);
-         if (pointer)
-            dinput_pointer_store_pos(pointer, lParam);
-         return true;
-      }
-      case WM_DEVICECHANGE:
-      {
-         if (di->joypad)
-            di->joypad->destroy();
-         di->joypad = input_joypad_init_driver(settings->input.joypad_driver);
+      case WM_MOUSEMOVE:
+         di->window_pos_x = GET_X_LPARAM(lParam);
+         di->window_pos_y = GET_Y_LPARAM(lParam);
          break;
-      }
+      case WM_POINTERDOWN:
+         {
+            struct pointer_status *new_pointer =
+               (struct pointer_status *)malloc(sizeof(struct pointer_status));
+
+            if (!new_pointer)
+            {
+               RARCH_ERR("dinput_handle_message: pointer allocation in WM_POINTERDOWN failed.\n");
+               return false;
+            }
+
+            new_pointer->pointer_id = GET_POINTERID_WPARAM(wParam);
+            dinput_pointer_store_pos(new_pointer, lParam);
+            dinput_add_pointer(di, new_pointer);
+            return true;
+         }
+      case WM_POINTERUP:
+         {
+            int pointer_id = GET_POINTERID_WPARAM(wParam);
+            dinput_delete_pointer(di, pointer_id);
+            return true;
+         }
+      case WM_POINTERUPDATE:
+         {
+            int pointer_id = GET_POINTERID_WPARAM(wParam);
+            struct pointer_status *pointer = dinput_find_pointer(di, pointer_id);
+            if (pointer)
+               dinput_pointer_store_pos(pointer, lParam);
+            return true;
+         }
+      case WM_DEVICECHANGE:
+         {
+            if (di->joypad)
+               di->joypad->destroy();
+            di->joypad = input_joypad_init_driver(settings->input.joypad_driver, di);
+            break;
+         }
       case WM_MOUSEWHEEL:
-          {
-              if (((short) HIWORD(wParam))/120 > 0)
-                 di->mouse_wu = true;
-              if (((short) HIWORD(wParam))/120 < 0)
-                 di->mouse_wd = true;
-          }
-          break;
+         {
+            if (((short) HIWORD(wParam))/120 > 0)
+               di->mouse_wu = true;
+            if (((short) HIWORD(wParam))/120 < 0)
+               di->mouse_wd = true;
+         }
+         break;
       case WM_MOUSEHWHEEL:
-          {
-              if (((short) HIWORD(wParam))/120 > 0)
-                 di->mouse_hwu = true;
-              if (((short) HIWORD(wParam))/120 < 0)
-                 di->mouse_hwd = true;
-          }
-          break;
+         {
+            if (((short) HIWORD(wParam))/120 > 0)
+               di->mouse_hwu = true;
+            if (((short) HIWORD(wParam))/120 < 0)
+               di->mouse_hwd = true;
+         }
+         break;
    }
 
    return false;
@@ -631,11 +676,10 @@ static void dinput_free(void *data)
 static void dinput_grab_mouse(void *data, bool state)
 {
    struct dinput_input *di = (struct dinput_input*)data;
-   driver_t *driver = driver_get_ptr();
 
    IDirectInputDevice8_Unacquire(di->mouse);
    IDirectInputDevice8_SetCooperativeLevel(di->mouse,
-      (HWND)driver->video_window,
+      (HWND)video_driver_window_get(),
       state ?
       (DISCL_EXCLUSIVE | DISCL_FOREGROUND) :
       (DISCL_NONEXCLUSIVE | DISCL_FOREGROUND));
@@ -673,11 +717,28 @@ static uint64_t dinput_get_capabilities(void *data)
    return caps;
 }
 
+static bool dinput_keyboard_mapping_is_blocked(void *data)
+{
+   struct dinput_input *di = (struct dinput_input*)data;
+   if (!di)
+      return false;
+   return di->blocked;
+}
+
+static void dinput_keyboard_mapping_set_block(void *data, bool value)
+{
+   struct dinput_input *di = (struct dinput_input*)data;
+   if (!di)
+      return;
+   di->blocked = value;
+}
+
 input_driver_t input_dinput = {
    dinput_init,
    dinput_poll,
    dinput_input_state,
    dinput_key_pressed,
+   dinput_meta_key_pressed,
    dinput_free,
    NULL,
    NULL,
@@ -685,7 +746,10 @@ input_driver_t input_dinput = {
    "dinput",
 
    dinput_grab_mouse,
+   NULL,
    dinput_set_rumble,
    dinput_get_joypad_driver,
+   NULL,
+   dinput_keyboard_mapping_is_blocked,
+   dinput_keyboard_mapping_set_block,
 };
-

@@ -14,34 +14,24 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../../driver.h"
-#include "../../general.h"
-#include "../../runloop.h"
-#include "../video_monitor.h"
-#include "../drivers/gl_common.h"
+#include <sys/poll.h>
+#include <unistd.h>
 
 #include <wayland-client.h>
 #include <wayland-egl.h>
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <signal.h>
-#include <sys/poll.h>
-#include <unistd.h>
+#include "../../driver.h"
+#include "../../general.h"
+#include "../../runloop.h"
+#include "../common/egl_common.h"
+#include "../common/gl_common.h"
 
 typedef struct gfx_ctx_wayland_data
 {
-   EGLContext g_egl_ctx;
-   EGLContext g_egl_hw_ctx;
-   EGLSurface g_egl_surf;
-   EGLDisplay g_egl_dpy;
-   EGLConfig g_egl_config;
    bool g_resize;
-   bool g_use_hw_ctx;
    int g_fd;
    unsigned g_width;
    unsigned g_height;
-   unsigned g_interval;
    struct wl_display *g_dpy;
    struct wl_registry *g_registry;
    struct wl_compositor *g_compositor;
@@ -54,21 +44,13 @@ typedef struct gfx_ctx_wayland_data
 } gfx_ctx_wayland_data_t;
 
 
-static enum gfx_ctx_api g_api;
 static unsigned g_major;
 static unsigned g_minor;
 
-static volatile sig_atomic_t g_quit;
 
 #ifndef EGL_OPENGL_ES3_BIT_KHR
 #define EGL_OPENGL_ES3_BIT_KHR 0x0040
 #endif
-
-static void sighandler(int sig)
-{
-   (void)sig;
-   g_quit = 1;
-}
 
 /* Shell surface callbacks. */
 static void shell_surface_handle_ping(void *data,
@@ -83,9 +65,8 @@ static void shell_surface_handle_configure(void *data,
       struct wl_shell_surface *shell_surface,
       uint32_t edges, int32_t width, int32_t height)
 {
-   driver_t *driver = driver_get_ptr();
    gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
+      gfx_ctx_data_get_ptr();
 
    (void)data;
    (void)shell_surface;
@@ -115,9 +96,8 @@ static const struct wl_shell_surface_listener shell_surface_listener = {
 static void registry_handle_global(void *data, struct wl_registry *reg,
       uint32_t id, const char *interface, uint32_t version)
 {
-   driver_t *driver = driver_get_ptr();
    gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
+      gfx_ctx_data_get_ptr();
 
    (void)data;
    (void)version;
@@ -151,28 +131,7 @@ static void gfx_ctx_wl_destroy_resources(gfx_ctx_wayland_data_t *wl)
    if (!wl)
       return;
 
-   if (wl->g_egl_dpy)
-   {
-      if (wl->g_egl_ctx)
-      {
-         eglMakeCurrent(wl->g_egl_dpy,
-               EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-         eglDestroyContext(wl->g_egl_dpy, wl->g_egl_ctx);
-      }
-
-      if (wl->g_egl_hw_ctx)
-         eglDestroyContext(wl->g_egl_dpy, wl->g_egl_hw_ctx);
-
-      if (wl->g_egl_surf)
-         eglDestroySurface(wl->g_egl_dpy, wl->g_egl_surf);
-      eglTerminate(wl->g_egl_dpy);
-   }
-
-   wl->g_egl_ctx     = NULL;
-   wl->g_egl_hw_ctx  = NULL;
-   wl->g_egl_surf    = NULL;
-   wl->g_egl_dpy     = NULL;
-   wl->g_egl_config  = 0;
+   egl_destroy(NULL);
 
    if (wl->g_win)
       wl_egl_window_destroy(wl->g_win);
@@ -205,67 +164,11 @@ static void gfx_ctx_wl_destroy_resources(gfx_ctx_wayland_data_t *wl)
    wl->g_height = 0;
 }
 
-static void egl_report_error(void)
-{
-   EGLint error = eglGetError();
-   const char *str = NULL;
-
-   switch (error)
-   {
-      case EGL_SUCCESS:
-         str = "EGL_SUCCESS";
-         break;
-
-      case EGL_BAD_DISPLAY:
-         str = "EGL_BAD_DISPLAY";
-         break;
-
-      case EGL_BAD_SURFACE:
-         str = "EGL_BAD_SURFACE";
-         break;
-
-      case EGL_BAD_CONTEXT:
-         str = "EGL_BAD_CONTEXT";
-         break;
-
-      default:
-         str = "Unknown";
-         break;
-   }
-
-   RARCH_ERR("[Wayland/EGL]: #0x%x, %s\n", (unsigned)error, str);
-}
-
-static void gfx_ctx_wl_swap_interval(void *data, unsigned interval)
-{
-   driver_t *driver = driver_get_ptr();
-   gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
-
-   (void)data;
-
-   if (!wl)
-      return;
-
-   wl->g_interval = interval;
-
-   if (wl->g_egl_dpy && eglGetCurrentContext())
-   {
-      RARCH_LOG("[Wayland/EGL]: eglSwapInterval(%u)\n", wl->g_interval);
-      if (!eglSwapInterval(wl->g_egl_dpy, wl->g_interval))
-      {
-         RARCH_ERR("[Wayland/EGL]: eglSwapInterval() failed.\n");
-         egl_report_error();
-      }
-   }
-}
-
 static void flush_wayland_fd(void)
 {
    struct pollfd fd = {0};
-   driver_t *driver = driver_get_ptr();
    gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
+      gfx_ctx_data_get_ptr();
 
    wl_display_dispatch_pending(wl->g_dpy);
    wl_display_flush(wl->g_dpy);
@@ -278,7 +181,7 @@ static void flush_wayland_fd(void)
       if (fd.revents & (POLLERR | POLLHUP))
       {
          close(wl->g_fd);
-         g_quit = true;
+         g_egl_quit = true;
       }
 
       if (fd.revents & POLLIN)
@@ -310,25 +213,13 @@ static void gfx_ctx_wl_check_window(void *data, bool *quit,
       *height = new_height;
    }
 
-   *quit = g_quit;
-}
-
-static void gfx_ctx_wl_swap_buffers(void *data)
-{
-   driver_t *driver = driver_get_ptr();
-   gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
-
-   (void)data;
-
-   eglSwapBuffers(wl->g_egl_dpy, wl->g_egl_surf);
+   *quit = g_egl_quit;
 }
 
 static void gfx_ctx_wl_set_resize(void *data, unsigned width, unsigned height)
 {
-   driver_t *driver = driver_get_ptr();
    gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
+      gfx_ctx_data_get_ptr();
 
    (void)data;
 
@@ -337,11 +228,11 @@ static void gfx_ctx_wl_set_resize(void *data, unsigned width, unsigned height)
 
 static void gfx_ctx_wl_update_window_title(void *data)
 {
-   char buf[128], buf_fps[128];
-   driver_t *driver           = driver_get_ptr();
+   char buf[128]              = {0};
+   char buf_fps[128]          = {0};
    settings_t *settings       = config_get_ptr();
    gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
+      gfx_ctx_data_get_ptr();
 
    (void)data;
 
@@ -350,15 +241,14 @@ static void gfx_ctx_wl_update_window_title(void *data)
       wl_shell_surface_set_title(wl->g_shell_surf, buf);
 
    if (settings->fps_show)
-      rarch_main_msg_queue_push(buf_fps, 1, 1, false);
+      runloop_msg_queue_push(buf_fps, 1, 1, false);
 }
 
 static void gfx_ctx_wl_get_video_size(void *data,
       unsigned *width, unsigned *height)
 {
-   driver_t *driver = driver_get_ptr();
    gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
+      gfx_ctx_data_get_ptr();
 
    (void)data;
 
@@ -405,11 +295,9 @@ static bool gfx_ctx_wl_init(void *data)
       EGL_NONE,
    };
 
-   EGLint egl_major = 0, egl_minor = 0;
-   EGLint num_configs;
+   EGLint major = 0, minor = 0;
+   EGLint n;
    const EGLint *attrib_ptr;
-   driver_t *driver = driver_get_ptr();
-
    gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
       calloc(1, sizeof(gfx_ctx_wayland_data_t));
 
@@ -418,7 +306,7 @@ static bool gfx_ctx_wl_init(void *data)
    if (!wl)
       return false;
 
-   switch (g_api)
+   switch (g_egl_api)
    {
       case GFX_CTX_OPENGL_API:
          attrib_ptr = egl_attribs_gl;
@@ -438,7 +326,7 @@ static bool gfx_ctx_wl_init(void *data)
          attrib_ptr = NULL;
    }
 
-   g_quit = 0;
+   g_egl_quit = 0;
 
    wl->g_dpy = wl_display_connect(NULL);
    if (!wl->g_dpy)
@@ -447,7 +335,7 @@ static bool gfx_ctx_wl_init(void *data)
       goto error;
    }
 
-   driver->video_context_data = wl;
+   gfx_ctx_data_set(wl);
 
    wl->g_registry = wl_display_get_registry(wl->g_dpy);
    wl_registry_add_listener(wl->g_registry, &registry_listener, NULL);
@@ -467,29 +355,14 @@ static bool gfx_ctx_wl_init(void *data)
 
    wl->g_fd = wl_display_get_fd(wl->g_dpy);
 
-   wl->g_egl_dpy = eglGetDisplay((EGLNativeDisplayType)wl->g_dpy);
-
-   if (!wl->g_egl_dpy)
+   if (!egl_init_context((EGLNativeDisplayType)wl->g_dpy,
+            &major, &minor, &n, attrib_ptr))
    {
-      RARCH_ERR("Failed to create EGL window.\n");
+      egl_report_error();
       goto error;
    }
 
-   if (!eglInitialize(wl->g_egl_dpy, &egl_major, &egl_minor))
-   {
-      RARCH_ERR("Failed to initialize EGL.\n");
-      goto error;
-   }
-
-   RARCH_LOG("[Wayland/EGL]: EGL version: %d.%d\n", egl_major, egl_minor);
-
-   if (!eglChooseConfig(wl->g_egl_dpy, attrib_ptr, &wl->g_egl_config, 1, &num_configs))
-   {
-      RARCH_ERR("[Wayland/EGL]: eglChooseConfig failed with 0x%x.\n", eglGetError());
-      goto error;
-   }
-
-   if (num_configs == 0 || !wl->g_egl_config)
+   if (n == 0 || !g_egl_config)
    {
       RARCH_ERR("[Wayland/EGL]: No EGL configurations available.\n");
       goto error;
@@ -503,16 +376,14 @@ error:
    if (wl)
       free(wl);
 
-   if (driver->video_context_data)
-      free(driver->video_context_data);
-   driver->video_context_data = NULL;
+   gfx_ctx_free_data();
 
    return false;
 }
 
 static EGLint *egl_fill_attribs(EGLint *attr)
 {
-   switch (g_api)
+   switch (g_egl_api)
    {
 #ifdef EGL_KHR_create_context
       case GFX_CTX_OPENGL_API:
@@ -522,8 +393,9 @@ static EGLint *egl_fill_attribs(EGLint *attr)
 #ifdef GL_DEBUG
          bool debug = true;
 #else
-         global_t *global = global_get_ptr();
-         bool debug = global->system.hw_render_callback.debug_context;
+         const struct retro_hw_render_callback *hw_render =
+            (const struct retro_hw_render_callback*)video_driver_callback();
+         bool debug = hw_render->debug_context;
 #endif
 
          if (core)
@@ -532,8 +404,8 @@ static EGLint *egl_fill_attribs(EGLint *attr)
             *attr++ = g_major;
             *attr++ = EGL_CONTEXT_MINOR_VERSION_KHR;
             *attr++ = g_minor;
-            // Technically, we don't have core/compat until 3.2.
-            // Version 3.1 is either compat or not depending on GL_ARB_compatibility.
+            /* Technically, we don't have core/compat until 3.2.
+             * Version 3.1 is either compat or not depending on GL_ARB_compatibility. */
             if (version >= 3002)
             {
                *attr++ = EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR;
@@ -552,7 +424,7 @@ static EGLint *egl_fill_attribs(EGLint *attr)
 #endif
 
       case GFX_CTX_OPENGL_ES_API:
-         *attr++ = EGL_CONTEXT_CLIENT_VERSION; // Same as EGL_CONTEXT_MAJOR_VERSION
+         *attr++ = EGL_CONTEXT_CLIENT_VERSION; /* Same as EGL_CONTEXT_MAJOR_VERSION */
          *attr++ = g_major ? (EGLint)g_major : 2;
 #ifdef EGL_KHR_create_context
          if (g_minor > 0)
@@ -573,9 +445,8 @@ static EGLint *egl_fill_attribs(EGLint *attr)
 
 static void gfx_ctx_wl_destroy(void *data)
 {
-   driver_t *driver = driver_get_ptr();
    gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
+      gfx_ctx_data_get_ptr();
 
    (void)data;
 
@@ -584,29 +455,21 @@ static void gfx_ctx_wl_destroy(void *data)
 
    gfx_ctx_wl_destroy_resources(wl);
 
-   if (driver->video_context_data)
-      free(driver->video_context_data);
-   driver->video_context_data = NULL;
+   gfx_ctx_free_data();
 }
 
 static bool gfx_ctx_wl_set_video_mode(void *data,
       unsigned width, unsigned height,
       bool fullscreen)
 {
-   driver_t *driver = driver_get_ptr();
-   gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
-   struct sigaction sa = {{0}};
-
-   sa.sa_handler = sighandler;
-   sa.sa_flags   = SA_RESTART;
-   sigemptyset(&sa.sa_mask);
-   sigaction(SIGINT, &sa, NULL);
-   sigaction(SIGTERM, &sa, NULL);
-
    EGLint egl_attribs[16];
-   EGLint *attr = egl_attribs;
-   attr = egl_fill_attribs(attr);
+   EGLint *attr = NULL;
+   gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
+      gfx_ctx_data_get_ptr();
+
+   egl_install_sighandlers();
+
+   attr = egl_fill_attribs(egl_attribs);
 
    wl->g_width = width ? width : DEFAULT_WINDOWED_WIDTH;
    wl->g_height = height ? height : DEFAULT_WINDOWED_HEIGHT;
@@ -620,34 +483,16 @@ static bool gfx_ctx_wl_set_video_mode(void *data,
    wl_shell_surface_set_class(wl->g_shell_surf, "RetroArch");
    wl_shell_surface_set_title(wl->g_shell_surf, "RetroArch");
 
-   wl->g_egl_ctx = eglCreateContext(wl->g_egl_dpy, wl->g_egl_config, EGL_NO_CONTEXT,
-         attr != egl_attribs ? egl_attribs : NULL);
-
-   RARCH_LOG("[Wayland/EGL]: Created context: %p.\n", (void*)wl->g_egl_ctx);
-   if (wl->g_egl_ctx == EGL_NO_CONTEXT)
-      goto error;
-
-   if (wl->g_use_hw_ctx)
+   if (!egl_create_context((attr != egl_attribs) ? egl_attribs : NULL))
    {
-      wl->g_egl_hw_ctx = eglCreateContext(wl->g_egl_dpy, wl->g_egl_config, wl->g_egl_ctx,
-            attr != egl_attribs ? egl_attribs : NULL);
-      RARCH_LOG("[Wayland/EGL]: Created shared context: %p.\n", (void*)wl->g_egl_hw_ctx);
-
-      if (wl->g_egl_hw_ctx == EGL_NO_CONTEXT)
-         goto error;
+      egl_report_error();
+      goto error;
    }
 
-   wl->g_egl_surf = eglCreateWindowSurface(wl->g_egl_dpy, wl->g_egl_config,
-         (EGLNativeWindowType)wl->g_win, NULL);
-   if (!wl->g_egl_surf)
+   if (!egl_create_surface((EGLNativeWindowType)wl->g_win))
       goto error;
 
-   if (!eglMakeCurrent(wl->g_egl_dpy, wl->g_egl_surf, wl->g_egl_surf, wl->g_egl_ctx))
-      goto error;
-
-   RARCH_LOG("[Wayland/EGL]: Current context: %p.\n", (void*)eglGetCurrentContext());
-
-   gfx_ctx_wl_swap_interval(data, wl->g_interval);
+   egl_set_swap_interval(data, g_interval);
 
    if (fullscreen)
       wl_shell_surface_set_fullscreen(wl->g_shell_surf, WL_SHELL_SURFACE_FULLSCREEN_METHOD_DEFAULT, 0, NULL);
@@ -664,9 +509,11 @@ static void gfx_ctx_wl_input_driver(void *data,
       const input_driver_t **input, void **input_data)
 {
    (void)data;
-   //void *wl    = input_wayland.init();
-   //*input      = wl ? &input_wayland : NULL;
-   //*input_data = wl;
+#if 0
+   void *wl    = input_wayland.init();
+   *input      = wl ? &input_wayland : NULL;
+   *input_data = wl;
+#endif
    *input = NULL;
    *input_data = NULL;
 }
@@ -690,19 +537,14 @@ static bool gfx_ctx_wl_has_windowed(void *data)
    return true;
 }
 
-static gfx_ctx_proc_t gfx_ctx_wl_get_proc_address(const char *symbol)
-{
-   return eglGetProcAddress(symbol);
-}
-
 static bool gfx_ctx_wl_bind_api(void *data,
       enum gfx_ctx_api api, unsigned major, unsigned minor)
 {
    (void)data;
 
-   g_major = major;
-   g_minor = minor;
-   g_api = api;
+   g_major   = major;
+   g_minor   = minor;
+   g_egl_api = api;
 
    switch (api)
    {
@@ -727,32 +569,13 @@ static bool gfx_ctx_wl_bind_api(void *data,
    return false;
 }
 
-static void gfx_ctx_wl_bind_hw_render(void *data, bool enable)
-{
-   driver_t *driver = driver_get_ptr();
-   gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
-
-   (void)data;
-
-   wl->g_use_hw_ctx = enable;
-
-   if (!wl->g_egl_dpy)
-      return;
-   if (!wl->g_egl_surf)
-      return;
-
-   eglMakeCurrent(wl->g_egl_dpy, wl->g_egl_surf, wl->g_egl_surf,
-         enable ? wl->g_egl_hw_ctx : wl->g_egl_ctx);
-}
-
 static void keyboard_handle_keymap(void* data,
 struct wl_keyboard* keyboard,
 uint32_t format,
 int fd,
 uint32_t size)
 {
-   // TODO
+   /* TODO */
 }
 
 static void keyboard_handle_enter(void* data,
@@ -761,7 +584,7 @@ uint32_t serial,
 struct wl_surface* surface,
 struct wl_array* keys)
 {
-   // TODO
+   /* TODO */
 }
 
 static void keyboard_handle_leave(void* data,
@@ -769,7 +592,7 @@ struct wl_keyboard* keyboard,
 uint32_t serial,
 struct wl_surface* surface)
 {
-   // TODO
+   /* TODO */
 }
 
 static void keyboard_handle_key(void* data,
@@ -779,7 +602,7 @@ uint32_t time,
 uint32_t key,
 uint32_t state)
 {
-   // TODO
+   /* TODO */
 }
 
 static void keyboard_handle_modifiers(void* data,
@@ -790,7 +613,7 @@ uint32_t modsLatched,
 uint32_t modsLocked,
 uint32_t group)
 {
-   // TODO
+   /* TODO */
 }
 
 static const struct wl_keyboard_listener keyboard_listener = {
@@ -808,7 +631,7 @@ struct wl_surface* surface,
 wl_fixed_t sx,
 wl_fixed_t sy)
 {
-   // TODO
+   /* TODO */
 }
 
 static void pointer_handle_leave(void* data,
@@ -816,7 +639,7 @@ struct wl_pointer* pointer,
 uint32_t serial,
 struct wl_surface* surface)
 {
-   // TODO
+   /* TODO */
 }
 
 static void pointer_handle_motion(void* data,
@@ -825,7 +648,7 @@ uint32_t time,
 wl_fixed_t sx,
 wl_fixed_t sy)
 {
-   // TODO
+   /* TODO */
 }
 
 static void pointer_handle_button(void* data,
@@ -835,7 +658,7 @@ uint32_t time,
 uint32_t button,
 uint32_t state)
 {
-   // TODO
+   /* TODO */
 }
 
 static void pointer_handle_axis(void* data,
@@ -844,7 +667,7 @@ uint32_t time,
 uint32_t axis,
 wl_fixed_t value)
 {
-   // TODO
+   /* TODO */
 }
 
 
@@ -859,9 +682,8 @@ static const struct wl_pointer_listener pointer_listener = {
 static void seat_handle_capabilities(void *data,
 struct wl_seat *seat, unsigned caps)
 {
-   driver_t *driver = driver_get_ptr();
    gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)
-      driver->video_context_data;
+      gfx_ctx_data_get_ptr();
 
    if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !wl->g_wl_keyboard)
    {
@@ -894,7 +716,7 @@ const gfx_ctx_driver_t gfx_ctx_wayland = {
    gfx_ctx_wl_init,
    gfx_ctx_wl_destroy,
    gfx_ctx_wl_bind_api,
-   gfx_ctx_wl_swap_interval,
+   egl_set_swap_interval,
    gfx_ctx_wl_set_video_mode,
    gfx_ctx_wl_get_video_size,
    NULL, /* get_video_output_size */
@@ -908,12 +730,12 @@ const gfx_ctx_driver_t gfx_ctx_wayland = {
    gfx_ctx_wl_has_focus,
    gfx_ctx_wl_suppress_screensaver,
    gfx_ctx_wl_has_windowed,
-   gfx_ctx_wl_swap_buffers,
+   egl_swap_buffers,
    gfx_ctx_wl_input_driver,
-   gfx_ctx_wl_get_proc_address,
+   egl_get_proc_address,
    NULL,
    NULL,
    NULL,
    "wayland",
-   gfx_ctx_wl_bind_hw_render,
+   egl_bind_hw_render,
 };

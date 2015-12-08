@@ -18,15 +18,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #include <fat.h>
 #include <gctypes.h>
 #include <ogc/cache.h>
-#include "../../gfx/drivers/ppc_asm.h"
-#include <file/file_path.h>
-#include <retro_miscellaneous.h>
 #include <ogc/system.h>
 #include <ogc/usbstorage.h>
 #include <sdcard/wiisd_io.h>
+
+#include <file/file_path.h>
+#include <retro_miscellaneous.h>
+
+#include "../../defines/gx_defines.h"
+#include "../../verbosity.h"
 
 #define EXECUTE_ADDR ((uint8_t *) 0x91800000)
 #define BOOTER_ADDR  ((uint8_t *) 0x93000000)
@@ -36,8 +40,6 @@ extern uint8_t _binary_wii_app_booter_app_booter_bin_start[];
 extern uint8_t _binary_wii_app_booter_app_booter_bin_end[];
 #define booter_start _binary_wii_app_booter_app_booter_bin_start
 #define booter_end _binary_wii_app_booter_app_booter_bin_end
-
-#include "../../retroarch_logger.h"
 
 #ifdef IS_SALAMANDER
 char gx_rom_path[PATH_MAX_LENGTH];
@@ -119,9 +121,9 @@ void system_exec_wii(const char *_path, bool should_load_game)
    char path[PATH_MAX_LENGTH];
    char game_path[PATH_MAX_LENGTH];
 #ifndef IS_SALAMANDER
-   global_t *global = global_get_ptr();
-   bool original_verbose = global->verbosity;
-   global->verbosity = true;
+   bool *verbose    = retro_main_verbosity();
+   bool original_verbose = *verbose;
+   *verbose = true;
 #endif
 
    /* copy heap info into stack so it survives 
@@ -132,7 +134,10 @@ void system_exec_wii(const char *_path, bool should_load_game)
 #ifdef IS_SALAMANDER
       strlcpy(game_path, gx_rom_path, sizeof(game_path));
 #else
-      strlcpy(game_path, global->fullpath, sizeof(game_path));
+      char *fullpath = NULL;
+
+      runloop_ctl(RUNLOOP_CTL_GET_CONTENT_PATH, &fullpath);
+      strlcpy(game_path, fullpath, sizeof(game_path));
 #endif
    }
 
@@ -185,6 +190,6 @@ void system_exec_wii(const char *_path, bool should_load_game)
 exit:
    (void)0;
 #ifndef IS_SALAMANDER
-   global->verbosity = original_verbose;
+   *verbose = original_verbose;
 #endif
 }

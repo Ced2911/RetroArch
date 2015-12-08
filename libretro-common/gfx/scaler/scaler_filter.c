@@ -20,13 +20,15 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+
 #include <gfx/scaler/filter.h>
 #include <gfx/scaler/scaler_int.h>
 #include <retro_miscellaneous.h>
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
 #include <retro_inline.h>
+#include <filters.h>
 
 static bool allocate_filters(struct scaler_ctx *ctx)
 {
@@ -110,13 +112,6 @@ static bool gen_filter_bilinear(struct scaler_ctx *ctx)
    return true;
 }
 
-static INLINE double filter_sinc(double phase)
-{
-   if (fabs(phase) < 0.0001)
-      return 1.0;
-   return sin(phase) / phase;
-}
-
 static void gen_filter_sinc_sub(struct scaler_filter *filter,
       int len, int pos, int step, double phase_mul)
 {
@@ -127,17 +122,14 @@ static void gen_filter_sinc_sub(struct scaler_filter *filter,
    {
       filter->filter_pos[i] = pos >> 16;
 
-      //int16_t sinc_sum = 0;
       for (j = 0; j < sinc_size; j++)
       {
          double sinc_phase    = M_PI * ((double)((sinc_size << 15) + (pos & 0xffff)) / 0x10000 - j);
          double lanczos_phase = sinc_phase / ((sinc_size >> 1));
-         int16_t sinc_val     = FILTER_UNITY * filter_sinc(sinc_phase * phase_mul) * filter_sinc(lanczos_phase) * phase_mul;
-         //sinc_sum += sinc_val;
+         int16_t sinc_val     = FILTER_UNITY * sinc(sinc_phase * phase_mul) * sinc(lanczos_phase) * phase_mul;
 
          filter->filter[i * sinc_size + j] = sinc_val;
       }
-      //fprintf(stderr, "Sinc sum = %.3lf\n", (double)sinc_sum / FILTER_UNITY);
    }
 }
 
@@ -171,7 +163,6 @@ static bool gen_filter_sinc(struct scaler_ctx *ctx)
 
    return true;
 }
-
 
 static bool validate_filter(struct scaler_ctx *ctx)
 {

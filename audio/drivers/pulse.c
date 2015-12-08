@@ -13,13 +13,17 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-
-#include "../../driver.h"
-#include "../../general.h"
-#include <pulse/pulseaudio.h>
-#include <boolean.h>
-#include <string.h>
 #include <stdint.h>
+#include <string.h>
+
+#include <pulse/pulseaudio.h>
+
+#include <boolean.h>
+#include <retro_endianness.h>
+
+#include "../audio_driver.h"
+#include "../../configuration.h"
+#include "../../verbosity.h"
 
 typedef struct
 {
@@ -62,8 +66,8 @@ static void pulse_free(void *data)
 
 static void stream_success_cb(pa_stream *s, int success, void *data)
 {
-   (void)s;
    pa_t *pa = (pa_t*)data;
+   (void)s;
    pa->success = success;
    pa_threaded_mainloop_signal(pa->mainloop, 0);
 }
@@ -316,11 +320,11 @@ static size_t pulse_write_avail(void *data)
 {
    size_t length;
    pa_t *pa = (pa_t*)data;
-   global_t *global = global_get_ptr();
 
    pa_threaded_mainloop_lock(pa->mainloop);
    length = pa_stream_writable_size(pa->stream);
-   global->audio_data.driver_buffer_size = pa->buffer_size; /* Can change spuriously. */
+
+   audio_driver_set_buffer_size(pa->buffer_size); /* Can change spuriously. */
    pa_threaded_mainloop_unlock(pa->mainloop);
    return length;
 }

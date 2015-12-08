@@ -20,11 +20,18 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-
 #include <stdlib.h>
 #include <string.h>
 
 #include <queues/fifo_buffer.h>
+
+struct fifo_buffer
+{
+   uint8_t *buffer;
+   size_t bufsize;
+   size_t first;
+   size_t end;
+};
 
 fifo_buffer_t *fifo_new(size_t size)
 {
@@ -42,6 +49,12 @@ fifo_buffer_t *fifo_new(size_t size)
    buf->bufsize = size + 1;
 
    return buf;
+}
+
+void fifo_clear(fifo_buffer_t *buffer)
+{
+   buffer->first = 0;
+   buffer->end   = 0;
 }
 
 void fifo_free(fifo_buffer_t *buffer)

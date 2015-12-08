@@ -14,17 +14,8 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../../driver.h"
 #include <stdlib.h>
 #include <string.h>
-#include "../../general.h"
-#include "../../retroarch.h"
-#include <gfx/scaler/scaler.h>
-#include <retro_inline.h>
-#include "../video_viewport.h"
-#include "../video_monitor.h"
-#include "../video_context_driver.h"
-#include "../font_renderer_driver.h"
 
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -34,12 +25,22 @@
 #include <ctype.h>
 #include <assert.h>
 
-#include <sys/mman.h>
-#include <linux/omapfb.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
+#include <sys/mman.h>
+#include <linux/omapfb.h>
+
+#include <retro_inline.h>
+#include <gfx/scaler/scaler.h>
+
+#include "../../driver.h"
+#include "../../general.h"
+#include "../../retroarch.h"
+
+#include "../video_context_driver.h"
+#include "../font_driver.h"
 
 typedef struct omapfb_page
 {
@@ -85,9 +86,9 @@ typedef struct omapfb_data
 
 static const char *omapfb_get_fb_device(void)
 {
-   static char fbname[12];
-   settings_t *settings = config_get_ptr();
-   const int fbidx = settings->video.monitor_index;
+   static char fbname[12] = {0};
+   settings_t   *settings = config_get_ptr();
+   const int        fbidx = settings->video.monitor_index;
 
    if (fbidx == 0)
       return "/dev/fb0";
@@ -173,7 +174,9 @@ static int omapfb_detect_screen(omapfb_data_t *pdata)
    int w, h;
    FILE *f;
    int fb_id, overlay_id = -1, display_id = -1;
-   char buff[64], manager_name[64], display_name[64];
+   char buff[64]         = {0};
+   char manager_name[64] = {0};
+   char display_name[64] = {0};
 
    /* Find out the native screen resolution, which is needed to 
     * properly center the scaled image data. */
@@ -309,8 +312,8 @@ static int omapfb_setup_pages(omapfb_data_t *pdata)
    for (i = 0; i < pdata->num_pages; ++i)
    {
       pdata->pages[i].yoffset = i * pdata->current_state->si.yres;
-      pdata->pages[i].buf = pdata->fb_mem + (i * pdata->fb_framesize);
-      pdata->pages[i].used = false;
+      pdata->pages[i].buf     = (void*)((uint8_t*)pdata->fb_mem + (i * pdata->fb_framesize));
+      pdata->pages[i].used    = false;
    }
 
    pdata->old_page = NULL;
@@ -391,7 +394,7 @@ static int omapfb_alloc_mem(omapfb_data_t *pdata)
    unsigned mem_size;
    void* mem = NULL;
    const struct retro_game_geometry *geom = NULL;
-   global_t   *global   = global_get_ptr();
+   struct retro_system_av_info *av_info = NULL;
 
    assert(pdata->current_state == NULL);
 
@@ -423,7 +426,14 @@ static int omapfb_alloc_mem(omapfb_data_t *pdata)
       }
    }
 
-   geom     = &global->system.av_info.geometry;
+   av_info  = video_viewport_get_system_av_info();
+
+   if (av_info)
+      geom     = &av_info->geometry;
+
+   if (!geom)
+      goto error;
+
    mem_size = geom->max_width * geom->max_height *
       pdata->bpp * pdata->num_pages;
 
@@ -495,7 +505,7 @@ static float omapfb_scaling(omapfb_data_t *pdata, int width, int height)
 
 static int omapfb_setup_plane(omapfb_data_t *pdata, int width, int height)
 {
-   int x, y, w, h;
+   int x, y;
    struct omapfb_plane_info pi = {0};
    float scale = omapfb_scaling(pdata, width, height);
    int w = (int)(scale * width);
@@ -824,19 +834,17 @@ static void omap_init_font(omap_video_t *vid, const char *font_path, unsigned fo
       return;
    }
 
-   {
-      r = settings->video.msg_color_r * 255;
-      g = settings->video.msg_color_g * 255;
-      b = settings->video.msg_color_b * 255;
+   r = settings->video.msg_color_r * 255;
+   g = settings->video.msg_color_g * 255;
+   b = settings->video.msg_color_b * 255;
 
-      r = (r < 0) ? 0 : (r > 255 ? 255 : r);
-      g = (g < 0) ? 0 : (g > 255 ? 255 : g);
-      b = (b < 0) ? 0 : (b > 255 ? 255 : b);
+   r = (r < 0) ? 0 : (r > 255 ? 255 : r);
+   g = (g < 0) ? 0 : (g > 255 ? 255 : g);
+   b = (b < 0) ? 0 : (b > 255 ? 255 : b);
 
-      vid->font_rgb[0] = r;
-      vid->font_rgb[1] = g;
-      vid->font_rgb[2] = b;
-   }
+   vid->font_rgb[0] = r;
+   vid->font_rgb[1] = g;
+   vid->font_rgb[2] = b;
 }
 
 static void omap_render_msg(omap_video_t *vid, const char *msg)
@@ -914,22 +922,12 @@ static void omap_render_msg(omap_video_t *vid, const char *msg)
    }
 }
 
+/* FIXME/TODO: Filters not supported. */
 static void *omap_gfx_init(const video_info_t *video,
       const input_driver_t **input, void **input_data)
 {
-   omap_video_t *vid    = NULL;
    settings_t *settings = config_get_ptr();
-   global_t   *global   = global_get_ptr();
-
-   /* Don't support filters at the moment since they make estimations  *
-    * on the maximum used resolution difficult.                        */
-   if (global->filter.filter)
-   {
-      RARCH_ERR("[video_omap]: filters are not supported\n");
-      return NULL;
-   }
-
-   vid = (omap_video_t*)calloc(1, sizeof(omap_video_t));
+   omap_video_t *vid    = (omap_video_t*)calloc(1, sizeof(omap_video_t));
    if (!vid)
       return NULL;
 
@@ -979,13 +977,12 @@ fail:
 }
 
 static bool omap_gfx_frame(void *data, const void *frame, unsigned width,
-      unsigned height, unsigned pitch, const char *msg)
+      unsigned height, uint64_t frame_count, unsigned pitch, const char *msg)
 {
-   omap_video_t *vid;
+   omap_video_t *vid = (omap_video_t*)data;
 
    if (!frame)
       return true;
-   vid = data;
 
    if (width > 4 && height > 4 && (width != vid->width || height != vid->height))
    {
@@ -1142,10 +1139,8 @@ static const video_poke_interface_t omap_gfx_poke_interface = {
    NULL, /* get_video_output_size */
    NULL, /* get_video_output_prev */
    NULL, /* get_video_output_next */
-#ifdef HAVE_FBO
-   NULL,
-   NULL,
-#endif
+   NULL, /* get_current_framebuffer */
+   NULL, /* get_proc_address */
    NULL, /* set_aspect_ratio */
    NULL, /* apply_state_changes */
 #ifdef HAVE_MENU
@@ -1176,7 +1171,7 @@ video_driver_t video_omap = {
    omap_gfx_set_shader,
    omap_gfx_free,
    "omap",
-
+   NULL, /* set_viewport */
    omap_gfx_set_rotation,
    omap_gfx_viewport_info,
    omap_gfx_read_viewport,

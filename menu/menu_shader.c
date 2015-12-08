@@ -14,10 +14,18 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "menu_shader.h"
-#include "menu_entries.h"
+#include <string.h>
+
+#include <compat/strl.h>
+#include <retro_assert.h>
 #include <file/file_path.h>
 
+#include "menu_driver.h"
+#include "menu_hash.h"
+#include "menu_shader.h"
+#include "../configuration.h"
+#include "../runloop.h"
+#include "../verbosity.h"
 
 /**
  * menu_shader_manager_init:
@@ -27,7 +35,7 @@
 void menu_shader_manager_init(menu_handle_t *menu)
 {
 #ifdef HAVE_SHADER_MANAGER
-   char preset_path[PATH_MAX_LENGTH];
+   uint32_t ext_hash;
    const char *ext             = NULL;
    struct video_shader *shader = NULL;
    config_file_t *conf         = NULL;
@@ -40,11 +48,11 @@ void menu_shader_manager_init(menu_handle_t *menu)
 
    shader = (struct video_shader*)menu->shader;
 
-   if (*global->core_specific_config_path
+   if (*global->path.core_specific_config
          && settings->core_specific_config)
-      config_path = global->core_specific_config_path;
-   else if (*global->config_path)
-      config_path = global->config_path;
+      config_path = global->path.core_specific_config;
+   else if (*global->path.config)
+      config_path = global->path.config;
 
    /* In a multi-config setting, we can't have
     * conflicts on menu.cgp/menu.glslp. */
@@ -66,48 +74,55 @@ void menu_shader_manager_init(menu_handle_t *menu)
    }
 
    ext = path_get_extension(settings->video.shader_path);
-   if (strcmp(ext, "glslp") == 0 || strcmp(ext, "cgp") == 0)
+   ext_hash = menu_hash_calculate(ext);
+
+   switch (ext_hash)
    {
-      conf = config_file_new(settings->video.shader_path);
-      if (conf)
-      {
-         if (video_shader_read_conf_cgp(conf, shader))
+      case MENU_VALUE_GLSLP:
+      case MENU_VALUE_CGP:
+         conf = config_file_new(settings->video.shader_path);
+         if (conf)
          {
-            video_shader_resolve_relative(shader, settings->video.shader_path);
-            video_shader_resolve_parameters(conf, shader);
+            if (video_shader_read_conf_cgp(conf, shader))
+            {
+               video_shader_resolve_relative(shader, settings->video.shader_path);
+               video_shader_resolve_parameters(conf, shader);
+            }
+            config_file_free(conf);
          }
-         config_file_free(conf);
-      }
-   }
-   else if (strcmp(ext, "glsl") == 0 || strcmp(ext, "cg") == 0)
-   {
-      strlcpy(shader->pass[0].source.path, settings->video.shader_path,
-            sizeof(shader->pass[0].source.path));
-      shader->passes = 1;
-   }
-   else
-   {
-      const char *shader_dir = *settings->video.shader_dir ?
-         settings->video.shader_dir : settings->system_directory;
-
-      fill_pathname_join(preset_path, shader_dir, "menu.glslp", sizeof(preset_path));
-      conf = config_file_new(preset_path);
-
-      if (!conf)
-      {
-         fill_pathname_join(preset_path, shader_dir, "menu.cgp", sizeof(preset_path));
-         conf = config_file_new(preset_path);
-      }
-
-      if (conf)
-      {
-         if (video_shader_read_conf_cgp(conf, shader))
+         break;
+      case MENU_VALUE_GLSL:
+      case MENU_VALUE_CG:
+         strlcpy(shader->pass[0].source.path, settings->video.shader_path,
+               sizeof(shader->pass[0].source.path));
+         shader->passes = 1;
+         break;
+      default:
          {
-            video_shader_resolve_relative(shader, preset_path);
-            video_shader_resolve_parameters(conf, shader);
+            char preset_path[PATH_MAX_LENGTH];
+            const char *shader_dir = *settings->video.shader_dir ?
+               settings->video.shader_dir : settings->system_directory;
+
+            fill_pathname_join(preset_path, shader_dir, "menu.glslp", sizeof(preset_path));
+            conf = config_file_new(preset_path);
+
+            if (!conf)
+            {
+               fill_pathname_join(preset_path, shader_dir, "menu.cgp", sizeof(preset_path));
+               conf = config_file_new(preset_path);
+            }
+
+            if (conf)
+            {
+               if (video_shader_read_conf_cgp(conf, shader))
+               {
+                  video_shader_resolve_relative(shader, preset_path);
+                  video_shader_resolve_parameters(conf, shader);
+               }
+               config_file_free(conf);
+            }
          }
-         config_file_free(conf);
-      }
+         break;
    }
 #endif
 }
@@ -126,7 +141,6 @@ void menu_shader_manager_set_preset(struct video_shader *shader,
 #ifdef HAVE_SHADER_MANAGER
    config_file_t *conf         = NULL;
    settings_t *settings        = config_get_ptr();
-   menu_handle_t *menu         = menu_driver_get_ptr();
 
    settings->video.shader_enable = false;
 
@@ -162,7 +176,7 @@ void menu_shader_manager_set_preset(struct video_shader *shader,
    }
    config_file_free(conf);
 
-   menu->need_refresh = true;
+   menu_entries_set_refresh(false);
 #endif
 }
 
@@ -179,6 +193,7 @@ void menu_shader_manager_save_preset(
 #ifdef HAVE_SHADER_MANAGER
    char buffer[PATH_MAX_LENGTH], config_directory[PATH_MAX_LENGTH], preset_path[PATH_MAX_LENGTH];
    unsigned d, type            = RARCH_SHADER_NONE;
+   const char *dirs[3]         = {0};
    config_file_t *conf         = NULL;
    bool ret                    = false;
    global_t *global            = global_get_ptr();
@@ -205,10 +220,15 @@ void menu_shader_manager_save_preset(
       /* Append extension automatically as appropriate. */
       if (!strstr(basename, ".cgp") && !strstr(basename, ".glslp"))
       {
-         if (type == RARCH_SHADER_GLSL)
-            strlcat(buffer, ".glslp", sizeof(buffer));
-         else if (type == RARCH_SHADER_CG)
-            strlcat(buffer, ".cgp", sizeof(buffer));
+         switch (type)
+         {
+            case RARCH_SHADER_GLSL:
+               strlcat(buffer, ".glslp", sizeof(buffer));
+               break;
+            case RARCH_SHADER_CG:
+               strlcat(buffer, ".cgp", sizeof(buffer));
+               break;
+         }
       }
    }
    else
@@ -218,15 +238,13 @@ void menu_shader_manager_save_preset(
       strlcpy(buffer, conf_path, sizeof(buffer));
    }
 
-   if (*global->config_path)
+   if (*global->path.config)
       fill_pathname_basedir(config_directory,
-            global->config_path, sizeof(config_directory));
+            global->path.config, sizeof(config_directory));
 
-   const char *dirs[] = {
-      settings->video.shader_dir,
-      settings->menu_config_directory,
-      config_directory,
-   };
+   dirs[0] = settings->video.shader_dir;
+   dirs[1] = settings->menu_config_directory;
+   dirs[2] = config_directory;
 
    if (!(conf = (config_file_t*)config_file_new(NULL)))
       return;
@@ -331,5 +349,14 @@ void menu_shader_manager_apply_changes(void)
 #endif
    }
    menu_shader_manager_set_preset(NULL, shader_type, NULL);
+#endif
+}
+
+void menu_shader_free(menu_handle_t *menu)
+{
+#ifdef HAVE_SHADER_MANAGER
+   if (menu->shader)
+      free(menu->shader);
+   menu->shader = NULL;
 #endif
 }

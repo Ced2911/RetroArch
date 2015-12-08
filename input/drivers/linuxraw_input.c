@@ -14,60 +14,41 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../../driver.h"
+#include <unistd.h>
 
 #include <sys/ioctl.h>
 #include <linux/input.h>
 #include <linux/kd.h>
-#include <termios.h>
-#include <unistd.h>
 #include <signal.h>
-#include "../../general.h"
-#include "../input_keymaps.h"
-#include "../input_common.h"
-#include "../input_joypad.h"
 
-static long oldKbmd = 0xffff;
-static struct termios oldTerm, newTerm;
+#include <boolean.h>
+
+#include "../../configuration.h"
+#include "../../general.h"
+#include "../../verbosity.h"
+
+#include "../common/linux_common.h"
+#include "../input_keymaps.h"
+#include "../input_joypad_driver.h"
 
 typedef struct linuxraw_input
 {
+   bool blocked;
    const input_device_driver_t *joypad;
    bool state[0x80];
 } linuxraw_input_t;
 
-
-static void linuxraw_resetKbmd(void)
-{
-   driver_t *driver = driver_get_ptr();
-   if (oldKbmd != 0xffff)
-   {
-      ioctl(0, KDSKBMODE, oldKbmd);
-      tcsetattr(0, TCSAFLUSH, &oldTerm);
-      oldKbmd = 0xffff;
-   }
-
-   driver->stdin_claimed = false;
-}
-
-static void linuxraw_exitGracefully(int sig)
-{
-   linuxraw_resetKbmd();
-   kill(getpid(), sig);
-}
-
 static void *linuxraw_input_init(void)
 {
-   struct sigaction sa;
-   linuxraw_input_t *linuxraw = NULL;
-   driver_t *driver     = driver_get_ptr();
-   settings_t *settings = config_get_ptr();
+   struct sigaction sa         = {{0}};
+   linuxraw_input_t *linuxraw  = NULL;
+   settings_t *settings        = config_get_ptr();
 
    /* Only work on terminals. */
    if (!isatty(0))
       return NULL;
 
-   if (driver->stdin_claimed)
+   if (linux_terminal_grab_stdin(NULL))
    {
       RARCH_WARN("stdin is already used for content loading. Cannot use stdin for input.\n");
       return NULL;
@@ -77,52 +58,18 @@ static void *linuxraw_input_init(void)
    if (!linuxraw)
       return NULL;
 
-   if (oldKbmd == 0xffff)
+   if (!linux_terminal_disable_input())
    {
-      tcgetattr(0, &oldTerm);
-      newTerm = oldTerm;
-      newTerm.c_lflag &= ~(ECHO | ICANON | ISIG);
-      newTerm.c_iflag &= ~(ISTRIP | IGNCR | ICRNL | INLCR | IXOFF | IXON);
-      newTerm.c_cc[VMIN] = 0;
-      newTerm.c_cc[VTIME] = 0;
-
-      if (ioctl(0, KDGKBMODE, &oldKbmd) != 0)
-      {
-         free(linuxraw);
-         return NULL;
-      }
-   }
-
-   tcsetattr(0, TCSAFLUSH, &newTerm);
-
-   if (ioctl(0, KDSKBMODE, K_MEDIUMRAW) != 0)
-   {
-      linuxraw_resetKbmd();
+      linux_terminal_restore_input();
       free(linuxraw);
       return NULL;
    }
 
-   sa.sa_handler = linuxraw_exitGracefully;
-   sa.sa_flags = SA_RESTART | SA_RESETHAND;
-   sigemptyset(&sa.sa_mask);
-
-   /* Trap some standard termination codes so we 
-    * can restore the keyboard before we lose control. */
-   sigaction(SIGABRT, &sa, NULL);
-   sigaction(SIGBUS, &sa, NULL);
-   sigaction(SIGFPE, &sa, NULL);
-   sigaction(SIGILL, &sa, NULL);
-   sigaction(SIGQUIT, &sa, NULL);
-   sigaction(SIGSEGV, &sa, NULL);
-
-   atexit(linuxraw_resetKbmd);
-
-   linuxraw->joypad = input_joypad_init_driver(settings->input.joypad_driver);
+   linuxraw->joypad = input_joypad_init_driver(
+         settings->input.joypad_driver, linuxraw);
    input_keymaps_init_keyboard_lut(rarch_key_map_linux);
 
-   /* We need to disable use of stdin command interface if 
-    * stdin is supposed to be used for input. */
-   driver->stdin_claimed = true; 
+   linux_terminal_claim_stdin();
 
    return linuxraw;
 }
@@ -163,13 +110,23 @@ static int16_t linuxraw_analog_pressed(linuxraw_input_t *linuxraw,
    return pressed_plus + pressed_minus;
 }
 
-static bool linuxraw_bind_button_pressed(void *data, int key)
+static bool linuxraw_input_key_pressed(void *data, int key)
 {
    linuxraw_input_t *linuxraw = (linuxraw_input_t*)data;
    settings_t *settings       = config_get_ptr();
 
-   return linuxraw_is_pressed(linuxraw, settings->input.binds[0], key) ||
-      input_joypad_pressed(linuxraw->joypad, 0, settings->input.binds[0], key);
+   if (linuxraw_is_pressed(linuxraw, settings->input.binds[0], key))
+      return true;
+
+   if (input_joypad_pressed(linuxraw->joypad, 0, settings->input.binds[0], key))
+      return true;
+
+   return false;
+}
+
+static bool linuxraw_input_meta_key_pressed(void *data, int key)
+{
+   return false;
 }
 
 static int16_t linuxraw_input_state(void *data,
@@ -205,7 +162,7 @@ static void linuxraw_input_free(void *data)
    if (linuxraw->joypad)
       linuxraw->joypad->destroy();
 
-   linuxraw_resetKbmd();
+   linux_terminal_restore_input();
    free(data);
 }
 
@@ -242,7 +199,7 @@ static void linuxraw_input_poll(void *data)
       pressed = !(c & 0x80);
       c &= ~0x80;
 
-      // ignore extended scancodes
+      /* ignore extended scancodes */
       if (!c)
          read(STDIN_FILENO, &t, 2);
       else
@@ -271,17 +228,38 @@ static void linuxraw_grab_mouse(void *data, bool state)
    (void)state;
 }
 
+static bool linuxraw_keyboard_mapping_is_blocked(void *data)
+{
+   linuxraw_input_t *linuxraw = (linuxraw_input_t*)data;
+   if (!linuxraw)
+      return false;
+   return linuxraw->blocked;
+}
+
+static void linuxraw_keyboard_mapping_set_block(void *data, bool value)
+{
+   linuxraw_input_t *linuxraw = (linuxraw_input_t*)data;
+   if (!linuxraw)
+      return;
+   linuxraw->blocked = value;
+}
+
 input_driver_t input_linuxraw = {
    linuxraw_input_init,
    linuxraw_input_poll,
    linuxraw_input_state,
-   linuxraw_bind_button_pressed,
+   linuxraw_input_key_pressed,
+   linuxraw_input_meta_key_pressed,
    linuxraw_input_free,
    NULL,
    NULL,
    linuxraw_get_capabilities,
    "linuxraw",
    linuxraw_grab_mouse,
+   linux_terminal_grab_stdin,
    linuxraw_set_rumble,
    linuxraw_get_joypad_driver,
+   NULL,
+   linuxraw_keyboard_mapping_is_blocked,
+   linuxraw_keyboard_mapping_set_block,
 };

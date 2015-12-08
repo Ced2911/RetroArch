@@ -1,6 +1,5 @@
 /*  RetroArch - A frontend for libretro.
- *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
- *  Copyright (C) 2011-2015 - Daniel De Matteis
+ *  Copyright (C) 2014-2015 - Jay McCarthy
  *
  *  RetroArch is free software: you can redistribute it and/or modify it under the terms
  *  of the GNU General Public License as published by the Free Software Found-
@@ -14,519 +13,698 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "menu_entries.h"
-#include "menu_setting.h"
-#include "menu_navigation.h"
-#include <file/file_list.h>
-#include <file/file_path.h>
-#include <file/file_extract.h>
-#include <file/dir_list.h>
+#include <string.h>
 
-int menu_entries_setting_set_flags(rarch_setting_t *setting)
+#include <retro_inline.h>
+
+#include "menu_driver.h"
+#include "menu_cbs.h"
+#include "menu_hash.h"
+
+#include "../general.h"
+#include "../system.h"
+
+struct menu_list
 {
-   if (!setting)
-      return 0;
+   file_list_t **menu_stack;
+   size_t menu_stack_size;
+   file_list_t **selection_buf;
+   size_t selection_buf_size;
+};
 
-   if (setting->flags & SD_FLAG_IS_DRIVER)
-      return MENU_SETTING_DRIVER;
+struct menu_entries
+{
+   /* Flagged when menu entries need to be refreshed */
+   bool need_refresh;
+   bool nonblocking_refresh;
 
-   switch (setting->type)
-   {
-      case ST_ACTION:
-         return MENU_SETTING_ACTION;
-      case ST_PATH:
-         return MENU_FILE_PATH;
-      case ST_GROUP:
-         return MENU_SETTING_GROUP;
-      case ST_SUB_GROUP:
-         return MENU_SETTING_SUBGROUP;
-      default:
-         break;
-   }
+   size_t begin;
+   menu_list_t *menu_list;
+   rarch_setting_t *list_settings;
+};
 
-   return 0;
-}
+static menu_entries_t *menu_entries_data;
 
-#ifdef HAVE_LIBRETRODB
-int menu_entries_push_query(libretrodb_t *db,
-   libretrodb_cursor_t *cur, file_list_t *list)
+static void menu_list_free_list(file_list_t *list)
 {
    unsigned i;
-   struct rmsgpack_dom_value item;
-    
-   while (libretrodb_cursor_read_item(cur, &item) == 0)
-   {
-      if (item.type != RDT_MAP)
-         continue;
-        
-      for (i = 0; i < item.map.len; i++)
-      {
-         struct rmsgpack_dom_value *key = &item.map.items[i].key;
-         struct rmsgpack_dom_value *val = &item.map.items[i].value;
 
-         if (!key || !val)
-            continue;
-            
-         if (!strcmp(key->string.buff, "name"))
-         {
-            menu_list_push(list, val->string.buff, db->path,
-            MENU_FILE_RDB_ENTRY, 0);
-            break;
-         }
-      }
-   }
-    
-   return 0;
-}
-#endif
+   for (i = 0; i < list->size; i++)
+      menu_driver_list_free(list, i, list->size);
 
-int menu_entries_push_list(menu_handle_t *menu,
-      file_list_t *list,
-      const char *path, const char *label,
-      unsigned type, unsigned setting_flags)
-{
-   rarch_setting_t *setting = NULL;
-   settings_t *settings     = config_get_ptr();
-   
-   if (menu && menu->list_settings)
-      settings_list_free(menu->list_settings);
-
-   menu->list_settings      = (rarch_setting_t *)setting_new(setting_flags);
-   setting                  = (rarch_setting_t*)menu_setting_find(label);
-
-   if (!setting)
-      return -1;
-
-   menu_list_clear(list);
-
-   for (; setting->type != ST_END_GROUP; setting++)
-   {
-      if (
-            setting->type == ST_GROUP 
-            || setting->type == ST_SUB_GROUP
-            || setting->type == ST_END_SUB_GROUP
-            || (setting->flags & SD_FLAG_ADVANCED && 
-               !settings->menu.show_advanced_settings)
-         )
-         continue;
-
-      menu_list_push(list, setting->short_description,
-            setting->name, menu_entries_setting_set_flags(setting), 0);
-   }
-
-   menu_driver_populate_entries(path, label, type);
-
-   return 0;
+   if (list)
+      file_list_free(list);
 }
 
-static void menu_entries_content_list_push(
-      file_list_t *list, core_info_t *info, const char* path)
+static void menu_list_free(menu_list_t *menu_list)
 {
-   unsigned j;
-   struct string_list *str_list = NULL;
-
-   if (!info)
+   unsigned i;
+   if (!menu_list)
       return;
 
-   str_list = (struct string_list*)dir_list_new(path,
-         info->supported_extensions, true);
-
-   if (!str_list)
-      return;
-
-   dir_list_sort(str_list, true);
-
-   for (j = 0; j < str_list->size; j++)
+   for (i = 0; i < menu_list->menu_stack_size; i++)
    {
-      const char *name = str_list->elems[j].data;
-      
-      if (!name)
+      if (!menu_list->menu_stack[i])
          continue;
 
-      if (str_list->elems[j].attr.i == RARCH_DIRECTORY)
-         menu_entries_content_list_push(list, info, name);
-      else
-         menu_list_push(
-               list, name,
-               "content_actions",
-               MENU_FILE_CONTENTLIST_ENTRY, 0);
+      menu_list_free_list(menu_list->menu_stack[i]);
+      menu_list->menu_stack[i]    = NULL;
+   }
+   for (i = 0; i < menu_list->selection_buf_size; i++)
+   {
+      if (!menu_list->selection_buf[i])
+         continue;
+
+      menu_list_free_list(menu_list->selection_buf[i]);
+      menu_list->selection_buf[i] = NULL;
    }
 
-   string_list_free(str_list);
+   free(menu_list->menu_stack);
+   free(menu_list->selection_buf);
+
+   free(menu_list);
 }
 
-static int menu_entries_push_cores_list(file_list_t *list, core_info_t *info,
-      const char *path, bool push_databases_enable)
+static menu_list_t *menu_list_new(void)
 {
-   size_t i;
-   settings_t *settings     = config_get_ptr();
+   unsigned i;
+   menu_list_t           *list = (menu_list_t*)calloc(1, sizeof(*list));
 
-   if (!info->supports_no_game)
-      menu_entries_content_list_push(list, info, path);
-   else
-      menu_list_push(list, info->display_name, "content_actions",
-            MENU_FILE_CONTENTLIST_ENTRY, 0);
+   if (!list)
+      return NULL;
 
-   if (!push_databases_enable)
+   list->menu_stack          = (file_list_t**)calloc(1, sizeof(*list->menu_stack));
+
+   if (!list->menu_stack)
+      goto error;
+
+   list->selection_buf       = (file_list_t**)calloc(1, sizeof(*list->selection_buf));
+
+   if (!list->selection_buf)
+      goto error;
+
+   list->menu_stack_size      = 1;
+   list->selection_buf_size   = 1;
+
+   for (i = 0; i < list->menu_stack_size; i++)
+      list->menu_stack[i]    = (file_list_t*)calloc(1, sizeof(*list->menu_stack[i]));
+
+   for (i = 0; i < list->selection_buf_size; i++)
+      list->selection_buf[i] = (file_list_t*)calloc(1, sizeof(*list->selection_buf[i]));
+
+   return list;
+
+error:
+   menu_list_free(list);
+   return NULL;
+}
+
+static size_t menu_list_get_stack_size(menu_list_t *list, size_t idx)
+{
+   if (!list)
       return 0;
-   if (!info->databases_list)
-      return 0;
-
-   for (i = 0; i < info->databases_list->size; i++)
-   {
-      char db_path[PATH_MAX_LENGTH];
-      struct string_list *str_list = (struct string_list*)info->databases_list;
-
-      if (!str_list)
-         continue;
-
-      fill_pathname_join(db_path, settings->content_database,
-            str_list->elems[i].data, sizeof(db_path));
-      strlcat(db_path, ".rdb", sizeof(db_path));
-
-      if (!path_file_exists(db_path))
-         continue;
-
-      menu_list_push(list, path_basename(db_path), "core_database",
-            MENU_FILE_RDB, 0);
-   }
-
-   return 0;
+   return file_list_get_size(list->menu_stack[idx]);
 }
 
-int menu_entries_push_horizontal_menu_list(menu_handle_t *menu,
-      file_list_t *list,
-      const char *path, const char *label,
-      unsigned menu_type)
+void menu_entries_get_at_offset(const file_list_t *list, size_t idx,
+      const char **path, const char **label, unsigned *file_type,
+      size_t *entry_idx, const char **alt)
 {
-   core_info_t           *info = NULL;
-   global_t            *global = global_get_ptr();
-   core_info_list_t *info_list = (core_info_list_t*)global->core_info;
-   settings_t *settings        = config_get_ptr();
-
-   if (!info_list)
-      return -1;
-
-   info = (core_info_t*)&info_list->list[menu->categories.selection_ptr - 1];
-
-   if (!info)
-      return -1;
-
-   strlcpy(settings->libretro, info->path, sizeof(settings->libretro));
-
-   menu_list_clear(list);
-
-   menu_entries_push_cores_list(list, info, settings->core_assets_directory, true);
-
-   menu_list_populate_generic(list, path, label, menu_type);
-
-   return 0;
+   file_list_get_at_offset(list, idx, path, label, file_type, entry_idx);
+   file_list_get_alt_at_offset(list, idx, alt);
 }
 
-/**
- * menu_entries_parse_drive_list:
- * @list                     : File list handle.
- *
- * Generates default directory drive list.
- * Platform-specific.
- *
- **/
-static void menu_entries_parse_drive_list(file_list_t *list)
+void menu_entries_get_last(const file_list_t *list,
+      const char **path, const char **label,
+      unsigned *file_type, size_t *entry_idx)
 {
-   size_t i = 0;
-
-   (void)i;
-
-#if defined(GEKKO)
-#ifdef HW_RVL
-   menu_list_push(list,
-         "sd:/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "usb:/", "", MENU_FILE_DIRECTORY, 0);
-#endif
-   menu_list_push(list,
-         "carda:/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "cardb:/", "", MENU_FILE_DIRECTORY, 0);
-#elif defined(_XBOX1)
-   menu_list_push(list,
-         "C:", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "D:", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "E:", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "F:", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "G:", "", MENU_FILE_DIRECTORY, 0);
-#elif defined(_XBOX360)
-   menu_list_push(list,
-         "game:", "", MENU_FILE_DIRECTORY, 0);
-#elif defined(_WIN32)
-   unsigned drives = GetLogicalDrives();
-   char drive[] = " :\\";
-   for (i = 0; i < 32; i++)
-   {
-      drive[0] = 'A' + i;
-      if (drives & (1 << i))
-         menu_list_push(list,
-               drive, "", MENU_FILE_DIRECTORY, 0);
-   }
-#elif defined(__CELLOS_LV2__)
-   menu_list_push(list,
-         "/app_home/",   "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "/dev_hdd0/",   "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "/dev_hdd1/",   "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "/host_root/",  "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "/dev_usb000/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "/dev_usb001/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "/dev_usb002/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "/dev_usb003/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "/dev_usb004/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "/dev_usb005/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "/dev_usb006/", "", MENU_FILE_DIRECTORY, 0);
-#elif defined(PSP)
-   menu_list_push(list,
-         "ms0:/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "ef0:/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "host0:/", "", MENU_FILE_DIRECTORY, 0);
-#elif defined(_3DS)
-   menu_list_push(list,
-         "sdmc:/", "", MENU_FILE_DIRECTORY, 0);
-#elif defined(IOS)
-   menu_list_push(list,
-         "/var/mobile/Documents/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         "/var/mobile/", "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list,
-         g_defaults.core_dir, "", MENU_FILE_DIRECTORY, 0);
-   menu_list_push(list, "/", "",
-         MENU_FILE_DIRECTORY, 0);
-#else
-   menu_list_push(list, "/", "",
-         MENU_FILE_DIRECTORY, 0);
-#endif
+   if (list)
+      file_list_get_last(list, path, label, file_type, entry_idx);
 }
 
-
-int menu_entries_parse_list(
-      file_list_t *list, file_list_t *menu_list,
-      const char *dir, const char *label, unsigned type,
-      unsigned default_type_plain, const char *exts,
-      rarch_setting_t *setting)
+void *menu_entries_get_userdata_at_offset(const file_list_t *list, size_t idx)
 {
-   size_t i, list_size;
-   bool path_is_compressed, push_dir;
-   int                   device = 0;
-   struct string_list *str_list = NULL;
-   settings_t *settings         = config_get_ptr();
-   menu_handle_t *menu          = menu_driver_get_ptr();
-   global_t *global             = global_get_ptr();
-
-   (void)device;
-
-   if (!list || !menu_list)
-      return -1;
-
-   menu_list_clear(list);
-
-   if (!*dir)
-   {
-      menu_entries_parse_drive_list(list);
-      menu_driver_populate_entries(dir, label, type);
-      return 0;
-   }
-
-#if defined(GEKKO) && defined(HW_RVL)
-   slock_lock(gx_device_mutex);
-   device = gx_get_device_from_path(dir);
-
-   if (device != -1 && !gx_devices[device].mounted &&
-         gx_devices[device].interface->isInserted())
-      fatMountSimple(gx_devices[device].name, gx_devices[device].interface);
-
-   slock_unlock(gx_device_mutex);
-#endif
-
-   path_is_compressed = path_is_compressed_file(dir);
-   push_dir           = (setting && setting->browser_selection_type == ST_DIR);
-
-   if (path_is_compressed)
-      str_list = compressed_file_list_new(dir,exts);
-   else
-      str_list = dir_list_new(dir,
-            settings->menu.navigation.browser.filter.supported_extensions_enable 
-            ? exts : NULL, true);
-
-   if (push_dir)
-      menu_list_push(list, "<Use this directory>", "",
-            MENU_FILE_USE_DIRECTORY, 0);
-
-   if (!str_list)
-      return -1;
-
-   dir_list_sort(str_list, true);
-
-
-   list_size = str_list->size;
-   for (i = 0; i < str_list->size; i++)
-   {
-      bool is_dir;
-      const char *path = NULL;
-      menu_file_type_t file_type = MENU_FILE_NONE;
-
-      switch (str_list->elems[i].attr.i)
-      {
-         case RARCH_DIRECTORY:
-            file_type = MENU_FILE_DIRECTORY;
-            break;
-         case RARCH_COMPRESSED_ARCHIVE:
-            file_type = MENU_FILE_CARCHIVE;
-            break;
-         case RARCH_COMPRESSED_FILE_IN_ARCHIVE:
-            file_type = MENU_FILE_IN_CARCHIVE;
-            break;
-         case RARCH_PLAIN_FILE:
-         default:
-            if (!strcmp(label, "detect_core_list"))
-            {
-               if (path_is_compressed_file(str_list->elems[i].data))
-               {
-                  /* in case of deferred_core_list we have to interpret
-                   * every archive as an archive to disallow instant loading
-                   */
-                  file_type = MENU_FILE_CARCHIVE;
-                  break;
-               }
-            }
-            file_type = (menu_file_type_t)default_type_plain;
-            break;
-      }
-
-      is_dir = (file_type == MENU_FILE_DIRECTORY);
-
-      if (push_dir && !is_dir)
-         continue;
-
-      /* Need to preserve slash first time. */
-      path = str_list->elems[i].data;
-
-      if (*dir && !path_is_compressed)
-         path = path_basename(path);
-
-
-#ifdef HAVE_LIBRETRO_MANAGEMENT
-#ifdef RARCH_CONSOLE
-      if (!strcmp(label, "core_list") && (is_dir ||
-               strcasecmp(path, SALAMANDER_FILE) == 0))
-         continue;
-#endif
-#endif
-
-      /* Push type further down in the chain.
-       * Needed for shader manager currently. */
-      if (!strcmp(label, "core_list"))
-      {
-         /* Compressed cores are unsupported */
-         if (file_type == MENU_FILE_CARCHIVE)
-            continue;
-
-         menu_list_push(list, path, "",
-               is_dir ? MENU_FILE_DIRECTORY : MENU_FILE_CORE, 0);
-      }
-      else
-      menu_list_push(list, path, "",
-            file_type, 0);
-   }
-
-   string_list_free(str_list);
-
-   if (!strcmp(label, "core_list"))
-   {
-      menu_list_get_last_stack(menu->menu_list, &dir, NULL, NULL);
-      list_size = file_list_get_size(list);
-
-      for (i = 0; i < list_size; i++)
-      {
-         char core_path[PATH_MAX_LENGTH], display_name[PATH_MAX_LENGTH];
-         const char *path = NULL;
-
-         menu_list_get_at_offset(list, i, &path, NULL, &type);
-
-         if (type != MENU_FILE_CORE)
-            continue;
-
-         fill_pathname_join(core_path, dir, path, sizeof(core_path));
-
-         if (global->core_info &&
-               core_info_list_get_display_name(global->core_info,
-                  core_path, display_name, sizeof(display_name)))
-            menu_list_set_alt_at_offset(list, i, display_name);
-      }
-      menu_list_sort_on_alt(list);
-   }
-
-   menu_list_populate_generic(list, dir, label, type);
-
-   return 0;
+   if (!list)
+      return NULL;
+   return file_list_get_userdata_at_offset(list, idx);
 }
 
-int menu_entries_deferred_push(file_list_t *list, file_list_t *menu_list)
+menu_file_list_cbs_t *menu_entries_get_actiondata_at_offset(
+      const file_list_t *list, size_t idx)
 {
-   unsigned type             = 0;
-   const char *path          = NULL;
-   const char *label         = NULL;
-   menu_file_list_cbs_t *cbs = NULL;
-   menu_handle_t       *menu = menu_driver_get_ptr();
-
-   menu_list_get_last_stack(menu->menu_list, &path, &label, &type);
-
-   if (!strcmp(label, "Main Menu"))
-      return menu_entries_push_list(menu, list, path, label, type,
-            SL_FLAG_MAIN_MENU);
-   else if (!strcmp(label, "Horizontal Menu"))
-      return menu_entries_push_horizontal_menu_list(menu, list, path, label, type);
-
-   cbs = (menu_file_list_cbs_t*)
-      menu_list_get_last_stack_actiondata(menu->menu_list);
-
-   if (!cbs->action_deferred_push)
-      return 0;
-
-   return cbs->action_deferred_push(list, menu_list, path, label, type);
+   if (!list)
+      return NULL;
+   return (menu_file_list_cbs_t*)
+      file_list_get_actiondata_at_offset(list, idx);
 }
 
-/**
- * menu_entries_init:
- * @menu                     : Menu handle.
- *
- * Creates and initializes menu entries.
- *
- * Returns: true (1) if successful, otherwise false (0).
- **/
-bool menu_entries_init(menu_handle_t *menu)
+static int menu_entries_flush_stack_type(const char *needle, const char *label,
+      unsigned type, unsigned final_type)
 {
-   if (!menu)
+   return needle ? strcmp(needle, label) : (type != final_type);
+}
+
+static bool menu_list_pop_stack(menu_list_t *list, size_t idx, size_t *directory_ptr)
+{
+   file_list_t *menu_list = NULL;
+   if (!list)
       return false;
 
-   menu->list_settings = setting_new(SL_FLAG_ALL);
+   menu_list = list->menu_stack[idx];
 
-   menu_list_push_stack(menu->menu_list, "", "Main Menu", MENU_SETTINGS, 0);
-   menu_navigation_clear(&menu->navigation, true);
-   menu_entries_push_list(menu, menu->menu_list->selection_buf,
-         "", "Main Menu", 0, SL_FLAG_MAIN_MENU);
+   if (menu_list_get_stack_size(list, idx) <= 1)
+      return false;
+
+   menu_driver_list_cache(MENU_LIST_PLAIN, 0);
+
+   if (menu_list->size != 0)
+      menu_driver_list_free(menu_list, menu_list->size - 1, menu_list->size - 1);
+
+   file_list_pop(menu_list, directory_ptr);
+   menu_driver_list_set_selection(menu_list);
+
+   menu_entries_set_refresh(false);
 
    return true;
+}
+
+static void menu_list_flush_stack(menu_list_t *list,
+      size_t idx, const char *needle, unsigned final_type)
+{
+   const char *path       = NULL;
+   const char *label      = NULL;
+   unsigned type          = 0;
+   size_t entry_idx       = 0;
+   if (!list)
+      return;
+
+   menu_entries_set_refresh(false);
+   menu_entries_get_last(list->menu_stack[idx],
+         &path, &label, &type, &entry_idx);
+
+   while (menu_entries_flush_stack_type(
+            needle, label, type, final_type) != 0)
+   {
+      size_t new_selection_ptr;
+
+      menu_navigation_ctl(MENU_NAVIGATION_CTL_GET_SELECTION, &new_selection_ptr);
+
+      if (!menu_list_pop_stack(list, idx, &new_selection_ptr))
+         break;
+
+      menu_navigation_ctl(MENU_NAVIGATION_CTL_SET_SELECTION, &new_selection_ptr);
+
+      menu_entries_get_last(list->menu_stack[idx],
+            &path, &label, &type, &entry_idx);
+   }
+}
+
+void menu_entries_clear(file_list_t *list)
+{
+   unsigned i;
+   const menu_ctx_driver_t *driver = menu_ctx_driver_get_ptr();
+
+   if (driver->list_clear)
+      driver->list_clear(list);
+
+   for (i = 0; i < list->size; i++)
+      file_list_free_actiondata(list, i);
+
+   if (list)
+      file_list_clear(list);
+}
+
+void menu_entries_set_alt_at_offset(file_list_t *list, size_t idx,
+      const char *alt)
+{
+   file_list_set_alt_at_offset(list, idx, alt);
+}
+
+/**
+ * menu_entries_elem_is_dir:
+ * @list                     : File list handle.
+ * @offset                   : Offset index of element.
+ *
+ * Is the current entry at offset @offset a directory?
+ *
+ * Returns: true (1) if entry is a directory, otherwise false (0).
+ **/
+static bool menu_entries_elem_is_dir(file_list_t *list,
+      unsigned offset)
+{
+   unsigned type     = 0;
+
+   menu_entries_get_at_offset(list, offset, NULL, NULL, &type, NULL, NULL);
+
+   return type == MENU_FILE_DIRECTORY;
+}
+
+/**
+ * menu_entries_elem_get_first_char:
+ * @list                     : File list handle.
+ * @offset                   : Offset index of element.
+ *
+ * Gets the first character of an element in the
+ * file list.
+ *
+ * Returns: first character of element in file list.
+ **/
+static int menu_entries_elem_get_first_char(
+      file_list_t *list, unsigned offset)
+{
+   int ret;
+   const char *path = NULL;
+
+   menu_entries_get_at_offset(list, offset,
+         NULL, NULL, NULL, NULL, &path);
+
+   ret = tolower((int)*path);
+
+   /* "Normalize" non-alphabetical entries so they
+    * are lumped together for purposes of jumping. */
+   if (ret < 'a')
+      ret = 'a' - 1;
+   else if (ret > 'z')
+      ret = 'z' + 1;
+   return ret;
+}
+
+static void menu_entries_build_scroll_indices(file_list_t *list)
+{
+   int current;
+   bool current_is_dir;
+   size_t i, scroll_value   = 0;
+
+   if (!list || !list->size)
+      return;
+
+   menu_navigation_ctl(MENU_NAVIGATION_CTL_CLEAR_SCROLL_INDICES, NULL);
+   menu_navigation_ctl(MENU_NAVIGATION_CTL_ADD_SCROLL_INDEX, &scroll_value);
+
+   current        = menu_entries_elem_get_first_char(list, 0);
+   current_is_dir = menu_entries_elem_is_dir(list, 0);
+
+   for (i = 1; i < list->size; i++)
+   {
+      int first   = menu_entries_elem_get_first_char(list, i);
+      bool is_dir = menu_entries_elem_is_dir(list, i);
+
+      if ((current_is_dir && !is_dir) || (first > current))
+         menu_navigation_ctl(MENU_NAVIGATION_CTL_ADD_SCROLL_INDEX, &i);
+
+      current        = first;
+      current_is_dir = is_dir;
+   }
+
+
+   scroll_value = list->size - 1;
+   menu_navigation_ctl(MENU_NAVIGATION_CTL_ADD_SCROLL_INDEX, &scroll_value);
+}
+
+/**
+ * Before a refresh, we could have deleted a
+ * file on disk, causing selection_ptr to
+ * suddendly be out of range.
+ *
+ * Ensure it doesn't overflow.
+ **/
+void menu_entries_refresh(file_list_t *list)
+{
+   size_t list_size, selection;
+   if (!list)
+      return;
+   if (!menu_navigation_ctl(MENU_NAVIGATION_CTL_GET_SELECTION, &selection))
+      return;
+
+   menu_entries_build_scroll_indices(list);
+
+   list_size = menu_entries_get_size();
+
+   if ((selection >= list_size) && list_size)
+   {
+      size_t idx  = list_size - 1;
+      bool scroll = true;
+      menu_navigation_ctl(MENU_NAVIGATION_CTL_SET_SELECTION, &idx);
+      menu_navigation_ctl(MENU_NAVIGATION_CTL_SET, &scroll);
+   }
+   else if (!list_size)
+   {
+      bool pending_push = true;
+      menu_navigation_ctl(MENU_NAVIGATION_CTL_CLEAR, &pending_push);
+   }
+}
+
+rarch_setting_t *menu_setting_get_ptr(void)
+{
+   menu_entries_t *entries = menu_entries_data;
+
+   if (!entries)
+      return NULL;
+   return entries->list_settings;
+}
+
+menu_list_t *menu_list_get_ptr(void)
+{
+   menu_entries_t *entries = menu_entries_data;
+   if (!entries)
+      return NULL;
+   return entries->menu_list;
+}
+
+/* Sets the starting index of the menu entry list. */
+void menu_entries_set_start(size_t i)
+{
+   menu_entries_t *entries = menu_entries_data;
+   
+   if (entries)
+      entries->begin = i;
+}
+
+/* Returns the starting index of the menu entry list. */
+size_t menu_entries_get_start(void)
+{
+   menu_entries_t *entries = menu_entries_data;
+   
+   if (!entries)
+     return 0;
+
+   return entries->begin;
+}
+
+/* Returns the last index (+1) of the menu entry list. */
+size_t menu_entries_get_end(void)
+{
+   return menu_entries_get_size();
+}
+
+/* Get an entry from the top of the menu stack */
+void menu_entries_get(size_t i, menu_entry_t *entry)
+{
+   const char *label          = NULL;
+   const char *path           = NULL;
+   const char *entry_label    = NULL;
+   menu_file_list_cbs_t *cbs  = NULL;
+   file_list_t *selection_buf = menu_entries_get_selection_buf_ptr(0);
+
+   menu_entries_get_last_stack(NULL, &label, NULL, NULL);
+
+   entry->path[0] = entry->value[0] = entry->label[0] = '\0';
+
+   menu_entries_get_at_offset(selection_buf, i,
+         &path, &entry_label, &entry->type, &entry->entry_idx, NULL);
+
+   cbs = menu_entries_get_actiondata_at_offset(selection_buf, i);
+
+   if (cbs && cbs->action_get_value)
+      cbs->action_get_value(selection_buf,
+            &entry->spacing, entry->type, i, label,
+            entry->value,  sizeof(entry->value),
+            entry_label, path,
+            entry->path, sizeof(entry->path));
+
+   entry->idx = i;
+
+   if (entry_label)
+      strlcpy(entry->label, entry_label, sizeof(entry->label));
+}
+
+/* Sets title to what the name of the current menu should be. */
+int menu_entries_get_title(char *s, size_t len)
+{
+   unsigned menu_type        = 0;
+   const char *path          = NULL;
+   const char *label         = NULL;
+   menu_file_list_cbs_t *cbs = menu_entries_get_last_stack_actiondata();
+   
+   if (!cbs)
+      return -1;
+
+   menu_entries_get_last_stack(&path, &label, &menu_type, NULL);
+
+   if (cbs && cbs->action_get_title)
+      return cbs->action_get_title(path, label, menu_type, s, len);
+   return 0;
+}
+
+/* Returns true if a Back button should be shown (i.e. we are at least
+ * one level deep in the menu hierarchy). */
+bool menu_entries_show_back(void)
+{
+   return (menu_entries_get_stack_size(0) > 1);
+}
+
+/* Sets 's' to the name of the current core 
+ * (shown at the top of the UI). */
+int menu_entries_get_core_title(char *s, size_t len)
+{
+   settings_t *settings           = config_get_ptr();
+   rarch_system_info_t      *info = rarch_system_info_get_ptr();
+   const char *core_name          = g_system_menu.library_name;
+   const char *core_version       = g_system_menu.library_version;
+
+   if (!settings->menu.core_enable)
+      return -1; 
+
+   if (!core_name || core_name[0] == '\0')
+      core_name = info->info.library_name;
+   if (!core_name || core_name[0] == '\0')
+      core_name = menu_hash_to_str(MENU_VALUE_NO_CORE);
+
+   if (!core_version)
+      core_version = info->info.library_version;
+   if (!core_version)
+      core_version = "";
+
+   snprintf(s, len, "%s - %s %s", PACKAGE_VERSION,
+         core_name, core_version);
+
+   return 0;
+}
+
+file_list_t *menu_entries_get_menu_stack_ptr(size_t idx)
+{
+   menu_list_t *menu_list = menu_list_get_ptr();
+   if (!menu_list)
+      return NULL;
+   return menu_list->menu_stack[idx];
+}
+
+file_list_t *menu_entries_get_selection_buf_ptr(size_t idx)
+{
+   menu_list_t *menu_list = menu_list_get_ptr();
+   if (!menu_list)
+      return NULL;
+   return menu_list->selection_buf[idx];
+}
+
+bool menu_entries_needs_refresh(void)
+{
+   menu_entries_t *entries = menu_entries_data;
+
+   if (!entries || entries->nonblocking_refresh)
+      return false;
+   if (entries->need_refresh)
+      return true;
+   return false;
+}
+
+void menu_entries_set_refresh(bool nonblocking)
+{
+   menu_entries_t *entries = menu_entries_data;
+   if (entries)
+   {
+      if (nonblocking)
+         entries->nonblocking_refresh = true;
+      else
+         entries->need_refresh        = true;
+   }
+}
+
+void menu_entries_unset_refresh(bool nonblocking)
+{
+   menu_entries_t *entries = menu_entries_data;
+   if (entries)
+   {
+      if (nonblocking)
+         entries->nonblocking_refresh = false;
+      else
+         entries->need_refresh        = false;
+   }
+}
+
+bool menu_entries_init(void *data)
+{
+   menu_entries_t *entries = (menu_entries_t*)
+      calloc(1, sizeof(*entries));
+
+   if (!entries)
+      goto error;
+
+   if (!(entries->menu_list = (menu_list_t*)menu_list_new()))
+      goto error;
+
+   menu_entries_data = (struct menu_entries*)entries;
+
+   entries->list_settings      = menu_setting_new();
+
+   return true;
+
+error:
+   if (entries)
+      free(entries);
+   return false;
+}
+
+void menu_entries_free(void)
+{
+   menu_entries_t *entries = menu_entries_data;
+
+   if (!entries)
+      return;
+
+   if (entries->list_settings)
+      menu_setting_free(entries->list_settings);
+   entries->list_settings = NULL;
+
+   menu_list_free(entries->menu_list);
+   entries->menu_list     = NULL;
+
+   free(menu_entries_data);
+   menu_entries_data = NULL;
+}
+
+void menu_entries_push(file_list_t *list, const char *path, const char *label,
+      unsigned type, size_t directory_ptr, size_t entry_idx)
+{
+   size_t idx;
+   const menu_ctx_driver_t *driver = menu_ctx_driver_get_ptr();
+   menu_file_list_cbs_t *cbs       = NULL;
+   if (!list || !label)
+      return;
+
+   file_list_push(list, path, label, type, directory_ptr, entry_idx);
+
+   idx = list->size - 1;
+
+   if (driver->list_insert)
+      driver->list_insert(list, path, label, idx);
+
+   file_list_free_actiondata(list, idx);
+   cbs = (menu_file_list_cbs_t*)
+      calloc(1, sizeof(menu_file_list_cbs_t));
+
+   if (!cbs)
+      return;
+
+   file_list_set_actiondata(list, idx, cbs);
+
+   cbs->setting = menu_setting_find(label);
+
+   menu_cbs_init(list, cbs, path, label, type, idx);
+}
+
+bool menu_entries_increment_selection_buf(void)
+{
+   file_list_t **selection_buf    = NULL;
+   menu_list_t *menu_list         = menu_list_get_ptr();
+
+   if (!menu_list)
+      return false;
+
+   selection_buf = (file_list_t**)realloc(selection_buf, (menu_list->selection_buf_size + 1) * sizeof(*menu_list->selection_buf));
+
+   if (!selection_buf)
+      goto error;
+
+   menu_list->selection_buf = selection_buf;
+   menu_list->selection_buf[menu_list->selection_buf_size] = (file_list_t*)calloc(1, sizeof(*menu_list->selection_buf[menu_list->selection_buf_size]));
+   menu_list->selection_buf_size = menu_list->selection_buf_size + 1;
+
+   return true;
+
+error:
+   if (selection_buf)
+      free(selection_buf);
+   return false;
+}
+
+bool menu_entries_increment_menu_stack(void)
+{
+   file_list_t **menu_stack       = NULL;
+   menu_list_t *menu_list         = menu_list_get_ptr();
+
+   if (!menu_list)
+      return false;
+
+   menu_stack = (file_list_t**)realloc(menu_stack, (menu_list->menu_stack_size + 1) * sizeof(*menu_list->menu_stack));
+
+   if (!menu_stack)
+      goto error;
+
+   menu_list->menu_stack = menu_stack;
+   menu_list->menu_stack[menu_list->menu_stack_size] = (file_list_t*)calloc(1, sizeof(*menu_list->menu_stack[menu_list->menu_stack_size]));
+   menu_list->menu_stack_size = menu_list->menu_stack_size + 1;
+
+   return true;
+
+error:
+   if (menu_stack)
+      free(menu_stack);
+   return false;
+}
+
+menu_file_list_cbs_t *menu_entries_get_last_stack_actiondata(void)
+{
+   menu_list_t *menu_list         = menu_list_get_ptr();
+   if (!menu_list)
+      return NULL;
+   return (menu_file_list_cbs_t*)file_list_get_last_actiondata(menu_list->menu_stack[0]);
+}
+
+void menu_entries_get_last_stack(const char **path, const char **label,
+      unsigned *file_type, size_t *entry_idx)
+{
+   menu_list_t *menu_list         = menu_list_get_ptr();
+   if (menu_list)
+      menu_entries_get_last(menu_list->menu_stack[0], path, label, file_type, entry_idx);
+}
+
+void menu_entries_flush_stack(const char *needle, unsigned final_type)
+{
+   menu_list_t *menu_list         = menu_list_get_ptr();
+   if (menu_list)
+      menu_list_flush_stack(menu_list, 0, needle, final_type);
+}
+
+void menu_entries_pop_stack(size_t *ptr, size_t idx)
+{
+   menu_list_t *menu_list         = menu_list_get_ptr();
+   if (menu_list)
+      menu_list_pop_stack(menu_list, idx, ptr);
+}
+
+size_t menu_entries_get_stack_size(size_t idx)
+{
+   menu_list_t *menu_list         = menu_list_get_ptr();
+   if (!menu_list)
+      return 0;
+   return menu_list_get_stack_size(menu_list, idx);
+}
+
+size_t menu_entries_get_size(void)
+{
+   menu_list_t *menu_list         = menu_list_get_ptr();
+   if (!menu_list)
+      return 0;
+   return file_list_get_size(menu_list->selection_buf[0]);
+}
+
+rarch_setting_t *menu_entries_get_setting(uint32_t i)
+{
+   file_list_t *selection_buf = menu_entries_get_selection_buf_ptr(0);
+   menu_file_list_cbs_t *cbs  = menu_entries_get_actiondata_at_offset(selection_buf, i);
+
+   if (!cbs)
+      return NULL;
+   return cbs->setting;
 }

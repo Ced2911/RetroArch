@@ -19,13 +19,15 @@
 #include <ctype.h>
 #include <string.h>
 
+#include <compat/strl.h>
+#include <compat/posix_string.h>
+
 #include "video_state_python.h"
 #include "../dynamic.h"
 #include "../libretro.h"
 #include "../general.h"
-#include <compat/strl.h>
-#include <compat/posix_string.h>
-#include "../input/input_common.h"
+#include "../verbosity.h"
+#include "../input/input_config.h"
 #include "../file_ops.h"
 
 static PyObject* py_read_wram(PyObject *self, PyObject *args)
@@ -33,7 +35,7 @@ static PyObject* py_read_wram(PyObject *self, PyObject *args)
    unsigned addr;
    size_t   max;
    const uint8_t *data = (const uint8_t*)
-      pretro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+      core.retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
 
    (void)self;
 
@@ -43,7 +45,7 @@ static PyObject* py_read_wram(PyObject *self, PyObject *args)
       return Py_None;
    }
 
-   max = pretro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
+   max = core.retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
 
    if (!PyArg_ParseTuple(args, "I", &addr))
       return NULL;
@@ -62,7 +64,7 @@ static PyObject* py_read_vram(PyObject *self, PyObject *args)
    unsigned addr;
    size_t max;
    const uint8_t *data = (const uint8_t*)
-      pretro_get_memory_data(RETRO_MEMORY_VIDEO_RAM);
+      core.retro_get_memory_data(RETRO_MEMORY_VIDEO_RAM);
 
    (void)self;
 
@@ -72,7 +74,7 @@ static PyObject* py_read_vram(PyObject *self, PyObject *args)
       return Py_None;
    }
 
-   max = pretro_get_memory_size(RETRO_MEMORY_VIDEO_RAM);
+   max = core.retro_get_memory_size(RETRO_MEMORY_VIDEO_RAM);
 
    if (!PyArg_ParseTuple(args, "I", &addr))
       return NULL;
@@ -89,33 +91,15 @@ static PyObject* py_read_vram(PyObject *self, PyObject *args)
 
 static PyObject *py_read_input(PyObject *self, PyObject *args)
 {
-   unsigned user, key;
+   unsigned user, key, i;
+   const struct retro_keybind *py_binds[MAX_USERS];
    int16_t res = 0;
-   driver_t *driver = driver_get_ptr();
    settings_t *settings = config_get_ptr();
-   const struct retro_keybind *py_binds[MAX_USERS] = {
-      settings->input.binds[0],
-      settings->input.binds[1],
-      settings->input.binds[2],
-      settings->input.binds[3],
-      settings->input.binds[4],
-      settings->input.binds[5],
-      settings->input.binds[6],
-      settings->input.binds[7],
-      settings->input.binds[8],
-      settings->input.binds[9],
-      settings->input.binds[10],
-      settings->input.binds[11],
-      settings->input.binds[12],
-      settings->input.binds[13],
-      settings->input.binds[14],
-      settings->input.binds[15],
-   };
+   
+   for (i = 0; i < MAX_USERS; i++)
+      py_binds[i] = settings->input.binds[i];
    
    (void)self;
-
-   if (!driver->input_data)
-      return PyBool_FromLong(0);
 
    if (!PyArg_ParseTuple(args, "II", &user, &key))
       return NULL;
@@ -123,40 +107,22 @@ static PyObject *py_read_input(PyObject *self, PyObject *args)
    if (user > MAX_USERS || user < 1 || key >= RARCH_FIRST_META_KEY)
       return NULL;
 
-   if (!driver->block_libretro_input)
+   if (!input_driver_ctl(RARCH_INPUT_CTL_IS_LIBRETRO_INPUT_BLOCKED, NULL))
       res = input_driver_state(py_binds, user - 1, RETRO_DEVICE_JOYPAD, 0, key);
    return PyBool_FromLong(res);
 }
 
 static PyObject *py_read_analog(PyObject *self, PyObject *args)
 {
-   unsigned user, index, id;
+   unsigned user, index, id, i;
    int16_t res = 0;
-   driver_t *driver     = driver_get_ptr();
    settings_t *settings = config_get_ptr();
-   const struct retro_keybind *py_binds[MAX_USERS] = {
-      settings->input.binds[0],
-      settings->input.binds[1],
-      settings->input.binds[2],
-      settings->input.binds[3],
-      settings->input.binds[4],
-      settings->input.binds[5],
-      settings->input.binds[6],
-      settings->input.binds[7],
-      settings->input.binds[8],
-      settings->input.binds[9],
-      settings->input.binds[10],
-      settings->input.binds[11],
-      settings->input.binds[12],
-      settings->input.binds[13],
-      settings->input.binds[14],
-      settings->input.binds[15],
-   };
+   const struct retro_keybind *py_binds[MAX_USERS];
+
+   for (i = 0; i < MAX_USERS; i++)
+      py_binds[i] = settings->input.binds[i];
 
    (void)self;
-
-   if (!driver->input_data)
-      return PyBool_FromLong(0);
 
    if (!PyArg_ParseTuple(args, "III", &user, &index, &id))
       return NULL;
@@ -235,6 +201,7 @@ static char *dupe_newline(const char *str)
 {
    unsigned size;
    char *ret = NULL;
+
    if (!str)
       return NULL;
 
@@ -253,9 +220,11 @@ static char *dupe_newline(const char *str)
 static char *align_program(const char *program)
 {
    size_t prog_size;
-   char *new_prog = NULL, *save = NULL, *line;
+   char *new_prog      = NULL;
+   char *save          = NULL;
+   char *line          = NULL;
    unsigned skip_chars = 0;
-   char *prog = strdup(program);
+   char *prog          = strdup(program);
    if (!prog)
       return NULL;
 
@@ -296,13 +265,16 @@ static char *align_program(const char *program)
 py_state_t *py_state_new(const char *script,
       unsigned is_file, const char *pyclass)
 {
+   py_state_t *handle;
+   PyObject *hook;
+
    RARCH_LOG("Initializing Python runtime ...\n");
    PyImport_AppendInittab("rarch", &PyInit_Retro);
    Py_Initialize();
    RARCH_LOG("Initialized Python runtime.\n");
 
-   py_state_t *handle = (py_state_t*)calloc(1, sizeof(*handle));
-   PyObject *hook = NULL;
+   handle = (py_state_t*)calloc(1, sizeof(*handle));
+   hook = NULL;
 
    handle->main = PyImport_AddModule("__main__");
    if (!handle->main)
@@ -391,7 +363,7 @@ float py_state_get(py_state_t *handle, const char *id,
 {
    unsigned i;
    float retval;
-   PyObject *ret = NULL;
+   PyObject        *ret = NULL;
    settings_t *settings = config_get_ptr();
 
    for (i = 0; i < MAX_USERS; i++)

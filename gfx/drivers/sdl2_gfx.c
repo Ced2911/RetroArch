@@ -14,24 +14,28 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdlib.h>
+#include <string.h>
+
+#include <retro_inline.h>
+#include <gfx/scaler/scaler.h>
+
 #include "SDL.h"
 #include "SDL_syswm.h"
 #include "../../driver.h"
-#include <stdlib.h>
-#include <string.h>
 #include "../../general.h"
 #include "../../retroarch.h"
-#include "../../runloop.h"
 #include "../../performance.h"
-#include <retro_inline.h>
-#include <gfx/scaler/scaler.h>
-#include "../video_viewport.h"
-#include "../video_monitor.h"
+#include "../../verbosity.h"
 #include "../video_context_driver.h"
-#include "../font_renderer_driver.h"
+#include "../font_driver.h"
 
 #ifdef HAVE_X11
 #include "../common/x11_common.h"
+#endif
+
+#ifdef HAVE_MENU
+#include "../../menu/menu_driver.h"
 #endif
 
 #ifdef HAVE_CONFIG_H
@@ -92,7 +96,7 @@ static void sdl2_init_font(sdl2_video_t *vid, const char *font_path,
 {
    int i, r, g, b;
    SDL_Color colors[256];
-   SDL_Surface *tmp;
+   SDL_Surface *tmp = NULL;
    SDL_Palette *pal = NULL;
    const struct font_atlas *atlas = NULL;
    settings_t *settings = config_get_ptr();
@@ -100,7 +104,7 @@ static void sdl2_init_font(sdl2_video_t *vid, const char *font_path,
    if (!settings->video.font_enable)
       return;
 
-   if (!font_renderer_create_default(&vid->font_driver, &vid->font_data,
+   if (!font_renderer_create_default((const void**)&vid->font_driver, &vid->font_data,
                                     *font_path ? font_path : NULL, font_size))
    {
       RARCH_WARN("[SDL]: Could not initialize fonts.\n");
@@ -172,8 +176,10 @@ static void sdl2_render_msg(sdl2_video_t *vid, const char *msg)
 
    for (; *msg; msg++)
    {
+      SDL_Rect src_rect, dst_rect;
       int off_x, off_y, tex_x, tex_y;
-      const struct font_glyph *gly = vid->font_driver->get_glyph(vid->font_data, (uint8_t)*msg);
+      const struct font_glyph *gly = 
+         vid->font_driver->get_glyph(vid->font_data, (uint8_t)*msg);
 
       if (!gly)
          gly = vid->font_driver->get_glyph(vid->font_data, '?');
@@ -181,22 +187,23 @@ static void sdl2_render_msg(sdl2_video_t *vid, const char *msg)
       if (!gly)
          continue;
 
-      off_x  = gly->draw_offset_x;
-      off_y  = gly->draw_offset_y;
-      tex_x  = gly->atlas_offset_x;
-      tex_y  = gly->atlas_offset_y;
+      off_x      = gly->draw_offset_x;
+      off_y      = gly->draw_offset_y;
+      tex_x      = gly->atlas_offset_x;
+      tex_y      = gly->atlas_offset_y;
 
-      SDL_Rect srcrect = {
-         tex_x, tex_y,
-         (int)gly->width, (int)gly->height
-      };
+      src_rect.x = tex_x;
+      src_rect.y = tex_y;
+      src_rect.w = (int)gly->width;
+      src_rect.h = (int)gly->height;
 
-      SDL_Rect dstrect = {
-         x + delta_x + off_x, y + delta_y + off_y,
-         (int)gly->width, (int)gly->height
-      };
+      dst_rect.x = x + delta_x + off_x;
+      dst_rect.y = y + delta_y + off_y;
+      dst_rect.w = (int)gly->width;
+      dst_rect.h = (int)gly->height;
 
-      SDL_RenderCopyEx(vid->renderer, vid->font.tex, &srcrect, &dstrect, 0, NULL, SDL_FLIP_NONE);
+      SDL_RenderCopyEx(vid->renderer, vid->font.tex,
+            &src_rect, &dst_rect, 0, NULL, SDL_FLIP_NONE);
 
       delta_x += gly->advance_x;
       delta_y -= gly->advance_y;
@@ -205,8 +212,6 @@ static void sdl2_render_msg(sdl2_video_t *vid, const char *msg)
 
 static void sdl2_gfx_set_handles(sdl2_video_t *vid)
 {
-   driver_t *driver = driver_get_ptr();
-
    /* SysWMinfo headers are broken on OSX. */
 #if defined(_WIN32) || defined(HAVE_X11)
    SDL_SysWMinfo info;
@@ -216,13 +221,13 @@ static void sdl2_gfx_set_handles(sdl2_video_t *vid)
       return;
 
 #if defined(_WIN32)
-   driver->display_type  = RARCH_DISPLAY_WIN32;
-   driver->video_display = 0;
-   driver->video_window  = (uintptr_t)info.info.win.window;
+   video_driver_display_type_set(RARCH_DISPLAY_WIN32);
+   video_driver_display_set(0);
+   video_driver_window_set((uintptr_t)info.info.win.window);
 #elif defined(HAVE_X11)
-   driver->display_type  = RARCH_DISPLAY_X11;
-   driver->video_display = (uintptr_t)info.info.x11.display;
-   driver->video_window  = (uintptr_t)info.info.x11.window;
+   video_driver_display_type_set(RARCH_DISPLAY_X11);
+   video_driver_display_set((uintptr_t)info.info.x11.display);
+   video_driver_window_set((uintptr_t)info.info.x11.window);
 #endif
 #endif
 }
@@ -250,19 +255,27 @@ static void sdl2_init_renderer(sdl2_video_t *vid)
 
 static void sdl_refresh_renderer(sdl2_video_t *vid)
 {
+   SDL_Rect r;
+
    SDL_RenderClear(vid->renderer);
-   SDL_Rect r = { vid->vp.x, vid->vp.y, (int)vid->vp.width, (int)vid->vp.height };
+
+   r.x      = vid->vp.x;
+   r.y      = vid->vp.y;
+   r.w      = (int)vid->vp.width;
+   r.h      = (int)vid->vp.height;
+
    SDL_RenderSetViewport(vid->renderer, &r);
 
-   // breaks int scaling
-   // SDL_RenderSetLogicalSize(vid->renderer, vid->vp.width, vid->vp.height);
+   /* breaks int scaling */
+#if 0
+   SDL_RenderSetLogicalSize(vid->renderer, vid->vp.width, vid->vp.height);
+#endif
 }
 
 static void sdl_refresh_viewport(sdl2_video_t *vid)
 {
    int win_w, win_h;
    settings_t *settings = config_get_ptr();
-   global_t   *global   = global_get_ptr();
 
    SDL_GetWindowSize(vid->window, &win_w, &win_h);
 
@@ -274,11 +287,13 @@ static void sdl_refresh_viewport(sdl2_video_t *vid)
    vid->vp.full_height = win_h;
 
    if (settings->video.scale_integer)
-      video_viewport_get_scaled_integer(&vid->vp, win_w, win_h, global->system.aspect_ratio,
-                        vid->video.force_aspect);
+      video_viewport_get_scaled_integer(&vid->vp,
+            win_w, win_h, video_driver_get_aspect_ratio(),
+            vid->video.force_aspect);
    else if (settings->video.aspect_ratio_idx == ASPECT_RATIO_CUSTOM)
    {
-      const struct video_viewport *custom = &global->console.screen.viewports.custom_vp;
+      const struct video_viewport *custom = 
+         (const struct video_viewport*)video_viewport_get_custom();
 
       if (custom)
       {
@@ -292,7 +307,7 @@ static void sdl_refresh_viewport(sdl2_video_t *vid)
    {
       float delta;
       float device_aspect  = (float)win_w / win_h;
-      float desired_aspect = global->system.aspect_ratio;
+      float desired_aspect = video_driver_get_aspect_ratio();
 
       if (fabsf(device_aspect - desired_aspect) < 0.0001f)
       {
@@ -320,7 +335,7 @@ static void sdl_refresh_viewport(sdl2_video_t *vid)
 }
 
 static void sdl_refresh_input_size(sdl2_video_t *vid, bool menu, bool rgb32,
-                                   unsigned width, unsigned height, unsigned pitch)
+      unsigned width, unsigned height, unsigned pitch)
 {
    sdl2_tex_t *target = menu ? &vid->menu : &vid->frame;
 
@@ -328,11 +343,12 @@ static void sdl_refresh_input_size(sdl2_video_t *vid, bool menu, bool rgb32,
        || target->rgb32 != rgb32 || target->pitch != pitch)
    {
       unsigned format;
+      static struct retro_perf_counter sdl_create_texture = {0};
 
       sdl_tex_zero(target);
 
-      RARCH_PERFORMANCE_INIT(sdl_create_texture);
-      RARCH_PERFORMANCE_START(sdl_create_texture);
+      rarch_perf_init(&sdl_create_texture, "sdl_create_texture");
+      retro_perf_start(&sdl_create_texture);
 
       if (menu)
          format = rgb32 ? SDL_PIXELFORMAT_ARGB8888 : SDL_PIXELFORMAT_RGBA4444;
@@ -346,7 +362,7 @@ static void sdl_refresh_input_size(sdl2_video_t *vid, bool menu, bool rgb32,
       target->tex = SDL_CreateTexture(vid->renderer, format,
                                       SDL_TEXTUREACCESS_STREAMING, width, height);
 
-      RARCH_PERFORMANCE_STOP(sdl_create_texture);
+      retro_perf_stop(&sdl_create_texture);
 
       if (!target->tex)
       {
@@ -366,11 +382,13 @@ static void sdl_refresh_input_size(sdl2_video_t *vid, bool menu, bool rgb32,
    }
 }
 
-static void *sdl2_gfx_init(const video_info_t *video, const input_driver_t **input, void **input_data)
+static void *sdl2_gfx_init(const video_info_t *video,
+      const input_driver_t **input, void **input_data)
 {
    int i;
    unsigned flags;
    settings_t *settings = config_get_ptr();
+   sdl2_video_t *vid;
 
 #ifdef HAVE_X11
    XInitThreads();
@@ -384,7 +402,7 @@ static void *sdl2_gfx_init(const video_info_t *video, const input_driver_t **inp
    else if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0)
       return NULL;
 
-   sdl2_video_t *vid = (sdl2_video_t*)calloc(1, sizeof(*vid));
+   vid = (sdl2_video_t*)calloc(1, sizeof(*vid));
    if (!vid)
       return NULL;
 
@@ -408,8 +426,6 @@ static void *sdl2_gfx_init(const video_info_t *video, const input_driver_t **inp
                    mode.refresh_rate);
    }
 
-//   void *sdl_input = NULL;
-
    if (!video->fullscreen)
       RARCH_LOG("[SDL]: Creating window @ %ux%u\n", video->width, video->height);
 
@@ -428,7 +444,7 @@ static void *sdl2_gfx_init(const video_info_t *video, const input_driver_t **inp
       goto error;
    }
 
-   vid->video = *video;
+   vid->video         = *video;
    vid->video.smooth  = settings->video.smooth;
    vid->should_resize = true;
 
@@ -443,7 +459,9 @@ static void *sdl2_gfx_init(const video_info_t *video, const input_driver_t **inp
 
    sdl2_gfx_set_handles(vid);
 
-   *input = NULL;
+   sdl_refresh_viewport(vid);
+
+   *input      = NULL;
    *input_data = NULL;
 
    return vid;
@@ -478,33 +496,33 @@ static void check_window(sdl2_video_t *vid)
 }
 
 static bool sdl2_gfx_frame(void *data, const void *frame, unsigned width,
-                           unsigned height, unsigned pitch, const char *msg)
+      unsigned height, uint64_t frame_count,
+      unsigned pitch, const char *msg)
 {
-   char buf[128];
+   char buf[128]     = {0};
    sdl2_video_t *vid = (sdl2_video_t*)data;
-   runloop_t *runloop = rarch_main_get_ptr();
-   driver_t *driver = driver_get_ptr();
 
    if (vid->should_resize)
       sdl_refresh_viewport(vid);
 
    if (frame)
    {
+      static struct retro_perf_counter sdl_copy_frame = {0};
+
       sdl_refresh_input_size(vid, false, vid->video.rgb32, width, height, pitch);
 
-      RARCH_PERFORMANCE_INIT(sdl_copy_frame);
-      RARCH_PERFORMANCE_START(sdl_copy_frame);
+      rarch_perf_init(&sdl_copy_frame, "sdl_copy_frame");
+      retro_perf_start(&sdl_copy_frame);
 
       SDL_UpdateTexture(vid->frame.tex, NULL, frame, pitch);
 
-      RARCH_PERFORMANCE_STOP(sdl_copy_frame);
+      retro_perf_stop(&sdl_copy_frame);
    }
 
    SDL_RenderCopyEx(vid->renderer, vid->frame.tex, NULL, NULL, vid->rotation, NULL, SDL_FLIP_NONE);
 
 #ifdef HAVE_MENU
-   if (runloop->is_menu)
-      menu_driver_frame();
+   menu_driver_ctl(RARCH_MENU_CTL_FRAME, NULL);
 #endif
 
    if (vid->menu.active)
@@ -545,15 +563,13 @@ static bool sdl2_gfx_focus(void *data)
 
 static bool sdl2_gfx_suppress_screensaver(void *data, bool enable)
 {
-   driver_t *driver = driver_get_ptr();
-
    (void)data;
    (void)enable;
 
-   if (driver->display_type == RARCH_DISPLAY_X11)
+   if (video_driver_display_type_get() == RARCH_DISPLAY_X11)
    {
 #ifdef HAVE_X11
-      x11_suspend_screensaver(driver->video_window);
+      x11_suspend_screensaver(video_driver_window_get());
 #endif
       return true;
    }
@@ -593,7 +609,9 @@ static void sdl2_gfx_free(void *data)
 static void sdl2_gfx_set_rotation(void *data, unsigned rotation)
 {
    sdl2_video_t *vid = (sdl2_video_t*)data;
-   vid->rotation = 270 * rotation;
+
+   if (vid)
+      vid->rotation = 270 * rotation;
 }
 
 static void sdl2_gfx_viewport_info(void *data, struct video_viewport *vp)
@@ -604,15 +622,17 @@ static void sdl2_gfx_viewport_info(void *data, struct video_viewport *vp)
 
 static bool sdl2_gfx_read_viewport(void *data, uint8_t *buffer)
 {
+   SDL_Surface *surf = NULL, *bgr24 = NULL;
    sdl2_video_t *vid = (sdl2_video_t*)data;
+   static struct retro_perf_counter sdl2_gfx_read_viewport = {0};
 
-   RARCH_PERFORMANCE_INIT(sdl2_gfx_read_viewport);
-   RARCH_PERFORMANCE_START(sdl2_gfx_read_viewport);
+   rarch_perf_init(&sdl2_gfx_read_viewport, "sdl2_gfx_read_viewport");
+   retro_perf_start(&sdl2_gfx_read_viewport);
 
-   rarch_render_cached_frame();
+   video_driver_ctl(RARCH_DISPLAY_CTL_CACHED_FRAME_RENDER, NULL);
 
-   SDL_Surface *surf = SDL_GetWindowSurface(vid->window);
-   SDL_Surface *bgr24 = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_BGR24, 0);
+   surf  = SDL_GetWindowSurface(vid->window);
+   bgr24 = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_BGR24, 0);
 
    if (!bgr24)
    {
@@ -622,12 +642,12 @@ static bool sdl2_gfx_read_viewport(void *data, uint8_t *buffer)
 
    memcpy(buffer, bgr24->pixels, bgr24->h * bgr24->pitch);
 
-   RARCH_PERFORMANCE_STOP(sdl2_gfx_read_viewport);
+   retro_perf_stop(&sdl2_gfx_read_viewport);
 
    return true;
 }
 
-void sdl2_poke_set_filtering(void *data, unsigned index, bool smooth)
+static void sdl2_poke_set_filtering(void *data, unsigned index, bool smooth)
 {
    sdl2_video_t *vid = (sdl2_video_t*)data;
    vid->video.smooth = smooth;
@@ -635,86 +655,93 @@ void sdl2_poke_set_filtering(void *data, unsigned index, bool smooth)
    sdl_tex_zero(&vid->frame);
 }
 
-static void sdl2_poke_set_aspect_ratio(void *data, unsigned aspectratio_index)
+static void sdl2_poke_set_aspect_ratio(void *data, unsigned aspect_ratio_idx)
 {
    sdl2_video_t *vid    = (sdl2_video_t*)data;
-   global_t     *global = global_get_ptr();
+   enum rarch_display_ctl_state cmd = RARCH_DISPLAY_CTL_NONE;
 
-   switch (aspectratio_index)
+   switch (aspect_ratio_idx)
    {
       case ASPECT_RATIO_SQUARE:
-         video_viewport_set_square_pixel(global->system.av_info.geometry.base_width,
-                                       global->system.av_info.geometry.base_height);
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_SQUARE_PIXEL;
          break;
 
       case ASPECT_RATIO_CORE:
-         video_viewport_set_core();
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_CORE;
          break;
 
       case ASPECT_RATIO_CONFIG:
-         video_viewport_set_config();
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_CONFIG;
          break;
 
       default:
          break;
    }
 
-   global->system.aspect_ratio = aspectratio_lut[aspectratio_index].value;
+   if (cmd != RARCH_DISPLAY_CTL_NONE)
+      video_driver_ctl(cmd, NULL);
+
+   video_driver_set_aspect_ratio_value(aspectratio_lut[aspect_ratio_idx].value);
 
    vid->video.force_aspect = true;
    vid->should_resize = true;
 }
 
-void sdl2_poke_apply_state_changes(void *data)
+static void sdl2_poke_apply_state_changes(void *data)
 {
    sdl2_video_t *vid = (sdl2_video_t*)data;
    vid->should_resize = true;
 }
 
-void sdl2_poke_set_texture_frame(void *data, const void *frame, bool rgb32,
-                                unsigned width, unsigned height, float alpha)
+#ifdef HAVE_MENU
+static void sdl2_poke_set_texture_frame(void *data, const void *frame, bool rgb32,
+      unsigned width, unsigned height, float alpha)
 {
    sdl2_video_t *vid = (sdl2_video_t*)data;
 
    if (frame)
    {
+      static struct retro_perf_counter copy_texture_frame = {0};
+
       sdl_refresh_input_size(vid, true, rgb32, width, height,
                              width * (rgb32 ? 4 : 2));
 
-      RARCH_PERFORMANCE_INIT(copy_texture_frame);
-      RARCH_PERFORMANCE_START(copy_texture_frame);
+      rarch_perf_init(&copy_texture_frame, "copy_texture_frame");
+      retro_perf_start(&copy_texture_frame);
 
       SDL_UpdateTexture(vid->menu.tex, NULL, frame, vid->menu.pitch);
 
-      RARCH_PERFORMANCE_STOP(copy_texture_frame);
+      retro_perf_stop(&copy_texture_frame);
    }
 }
 
-void sdl2_poke_texture_enable(void *data, bool enable, bool full_screen)
+static void sdl2_poke_texture_enable(void *data, bool enable, bool full_screen)
 {
    sdl2_video_t *vid = (sdl2_video_t*)data;
 
    vid->menu.active = enable;
 }
 
-void sdl2_poke_set_osd_msg(void *data, const char *msg, const struct font_params *params, void *font)
+static void sdl2_poke_set_osd_msg(void *data, const char *msg,
+      const struct font_params *params, void *font)
 {
    sdl2_video_t *vid = (sdl2_video_t*)data;
    sdl2_render_msg(vid, msg);
-   fprintf(stderr, "[SDL]: OSD MSG: %s\n", msg);
+   RARCH_LOG("[SDL]: OSD MSG: %s\n", msg);
 }
 
-void sdl2_show_mouse(void *data, bool state)
+static void sdl2_show_mouse(void *data, bool state)
 {
    (void)data;
    SDL_ShowCursor(state);
 }
 
-void sdl2_grab_mouse_toggle(void *data)
+static void sdl2_grab_mouse_toggle(void *data)
 {
    sdl2_video_t *vid = (sdl2_video_t*)data;
    SDL_SetWindowGrab(vid->window, SDL_GetWindowGrab(vid->window));
 }
+#endif
 
 static video_poke_interface_t sdl2_video_poke_interface = {
    NULL,
@@ -722,23 +749,27 @@ static video_poke_interface_t sdl2_video_poke_interface = {
    NULL, /* get_video_output_size */
    NULL, /* get_video_output_prev */
    NULL, /* get_video_output_next */
-#ifdef HAVE_FBO
-   NULL,
-#endif
-   NULL,
+   NULL, /* get_current_framebuffer */
+   NULL, /* get_proc_address */
    sdl2_poke_set_aspect_ratio,
    sdl2_poke_apply_state_changes,
 #ifdef HAVE_MENU
    sdl2_poke_set_texture_frame,
    sdl2_poke_texture_enable,
-#endif
    sdl2_poke_set_osd_msg,
    sdl2_show_mouse,
    sdl2_grab_mouse_toggle,
+#else
+   NULL,
+   NULL,
+   NULL,
+   NULL,
+   NULL,
+#endif
    NULL,
 };
 
-void sdl2_gfx_poke_interface(void *data, const video_poke_interface_t **iface)
+static void sdl2_gfx_poke_interface(void *data, const video_poke_interface_t **iface)
 {
    (void)data;
    *iface = &sdl2_video_poke_interface;
@@ -766,6 +797,7 @@ video_driver_t video_sdl2 = {
    sdl2_gfx_free,
    "sdl2",
 
+   NULL,
    sdl2_gfx_set_rotation,
    sdl2_gfx_viewport_info,
    sdl2_gfx_read_viewport,

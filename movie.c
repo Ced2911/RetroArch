@@ -14,13 +14,17 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "movie.h"
-#include "hash.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <rhash.h>
+#include <retro_endianness.h>
+
+#include "movie.h"
 #include "general.h"
-#include "dynamic.h"
+#include "msg_hash.h"
+#include "verbosity.h"
 
 struct bsv_movie
 {
@@ -41,6 +45,23 @@ struct bsv_movie
    bool first_rewind;
    bool did_rewind;
 };
+
+struct bsv_state
+{
+   /* Movie playback/recording support. */
+   bsv_movie_t *movie;
+   char movie_path[PATH_MAX_LENGTH];
+   bool movie_playback;
+   bool eof_exit;
+
+   /* Immediate playback/recording. */
+   char movie_start_path[PATH_MAX_LENGTH];
+   bool movie_start_recording;
+   bool movie_start_playback;
+   bool movie_end;
+};
+
+struct bsv_state bsv_movie_state;
 
 static bool init_playback(bsv_movie_t *handle, const char *path)
 {
@@ -90,8 +111,8 @@ static bool init_playback(bsv_movie_t *handle, const char *path)
          return false;
       }
 
-      if (pretro_serialize_size() == state_size)
-         pretro_unserialize(handle->state, state_size);
+      if (core.retro_serialize_size() == state_size)
+         core.retro_unserialize(handle->state, state_size);
       else
          RARCH_WARN("Movie format seems to have a different serializer version. Will most likely fail.\n");
    }
@@ -118,7 +139,7 @@ static bool init_record(bsv_movie_t *handle, const char *path)
     * BSV1 in a HEX editor, big-endian. */
    header[MAGIC_INDEX]      = swap_if_little32(BSV_MAGIC);
    header[CRC_INDEX]        = swap_if_big32(global->content_crc);
-   state_size               = pretro_serialize_size();
+   state_size               = core.retro_serialize_size();
    header[STATE_SIZE_INDEX] = swap_if_big32(state_size);
 
    fwrite(header, 4, sizeof(uint32_t), handle->file);
@@ -132,7 +153,7 @@ static bool init_record(bsv_movie_t *handle, const char *path)
       if (!handle->state)
          return false;
 
-      pretro_serialize(handle->state, state_size);
+      core.retro_serialize(handle->state, state_size);
       fwrite(handle->state, 1, state_size, handle->file);
    }
 
@@ -151,8 +172,9 @@ void bsv_movie_free(bsv_movie_t *handle)
    free(handle);
 }
 
-bool bsv_movie_get_input(bsv_movie_t *handle, int16_t *input)
+bool bsv_movie_get_input(int16_t *input)
 {
+   bsv_movie_t *handle = bsv_movie_state.movie;
    if (fread(input, sizeof(int16_t), 1, handle->file) != 1)
       return false;
 
@@ -160,8 +182,10 @@ bool bsv_movie_get_input(bsv_movie_t *handle, int16_t *input)
    return true;
 }
 
-void bsv_movie_set_input(bsv_movie_t *handle, int16_t input)
+void bsv_movie_set_input(int16_t input)
 {
+   bsv_movie_t *handle = bsv_movie_state.movie;
+
    input = swap_if_big16(input);
    fwrite(&input, sizeof(int16_t), 1, handle->file);
 }
@@ -245,7 +269,7 @@ void bsv_movie_frame_rewind(bsv_movie_t *handle)
          /* If recording, we simply reset
           * the starting point. Nice and easy. */
          fseek(handle->file, 4 * sizeof(uint32_t), SEEK_SET);
-         pretro_serialize(handle->state, handle->state_size);
+         core.retro_serialize(handle->state, handle->state_size);
          fwrite(handle->state, 1, handle->state_size, handle->file);
       }
       else
@@ -253,3 +277,136 @@ void bsv_movie_frame_rewind(bsv_movie_t *handle)
    }
 }
 
+static void bsv_movie_init_state(void)
+{
+   settings_t *settings = config_get_ptr();
+
+   if (bsv_movie_ctl(BSV_MOVIE_CTL_START_PLAYBACK, NULL))
+   {
+      if (!(bsv_movie_init_handle(bsv_movie_state.movie_start_path,
+                  RARCH_MOVIE_PLAYBACK)))
+      {
+         RARCH_ERR("%s: \"%s\".\n",
+               msg_hash_to_str(MSG_FAILED_TO_LOAD_MOVIE_FILE),
+               bsv_movie_state.movie_start_path);
+         retro_fail(1, "event_init_movie()");
+      }
+
+      bsv_movie_state.movie_playback = true;
+      runloop_msg_queue_push_new(MSG_STARTING_MOVIE_PLAYBACK, 2, 180, false);
+      RARCH_LOG("%s.\n", msg_hash_to_str(MSG_STARTING_MOVIE_PLAYBACK));
+      settings->rewind_granularity = 1;
+   }
+   else if (bsv_movie_ctl(BSV_MOVIE_CTL_START_RECORDING, NULL))
+   {
+      char msg[256];
+      snprintf(msg, sizeof(msg),
+            "%s \"%s\".",
+            msg_hash_to_str(MSG_STARTING_MOVIE_RECORD_TO),
+            bsv_movie_state.movie_start_path);
+
+      if (!(bsv_movie_init_handle(bsv_movie_state.movie_start_path,
+                  RARCH_MOVIE_RECORD)))
+      {
+         runloop_msg_queue_push_new(MSG_FAILED_TO_START_MOVIE_RECORD, 1, 180, true);
+         RARCH_ERR("%s.\n", msg_hash_to_str(MSG_FAILED_TO_START_MOVIE_RECORD));
+         return;
+      }
+
+      runloop_msg_queue_push(msg, 1, 180, true);
+      RARCH_LOG("%s \"%s\".\n",
+            msg_hash_to_str(MSG_STARTING_MOVIE_RECORD_TO),
+            bsv_movie_state.movie_start_path);
+      settings->rewind_granularity = 1;
+   }
+}
+
+bool bsv_movie_ctl(enum bsv_ctl_state state, void *data)
+{
+   switch (state)
+   {
+      case BSV_MOVIE_CTL_IS_INITED:
+         return bsv_movie_state.movie;
+      case BSV_MOVIE_CTL_PLAYBACK_ON:
+         return bsv_movie_state.movie && bsv_movie_state.movie_playback;
+      case BSV_MOVIE_CTL_PLAYBACK_OFF:
+         return bsv_movie_state.movie && !bsv_movie_state.movie_playback;
+      case BSV_MOVIE_CTL_START_RECORDING:
+         return bsv_movie_state.movie_start_recording;
+      case BSV_MOVIE_CTL_SET_START_RECORDING:
+         bsv_movie_state.movie_start_recording = true;
+         break;
+      case BSV_MOVIE_CTL_UNSET_START_RECORDING:
+         bsv_movie_state.movie_start_recording = false;
+         break;
+      case BSV_MOVIE_CTL_START_PLAYBACK:
+         return bsv_movie_state.movie_start_playback;
+      case BSV_MOVIE_CTL_SET_START_PLAYBACK:
+         bsv_movie_state.movie_start_playback = true;
+         break;
+      case BSV_MOVIE_CTL_UNSET_START_PLAYBACK:
+         bsv_movie_state.movie_start_playback = false;
+         break;
+      case BSV_MOVIE_CTL_END:
+         return bsv_movie_state.movie_end;
+      case BSV_MOVIE_CTL_SET_END_EOF:
+         bsv_movie_state.eof_exit = true;
+         break;
+      case BSV_MOVIE_CTL_END_EOF:
+         return bsv_movie_state.movie_end && bsv_movie_state.eof_exit;
+      case BSV_MOVIE_CTL_SET_END:
+         bsv_movie_state.movie_end = true;
+         break;
+      case BSV_MOVIE_CTL_UNSET_END:
+         bsv_movie_state.movie_end = false;
+         break;
+      case BSV_MOVIE_CTL_UNSET_PLAYBACK:
+         bsv_movie_state.movie_playback = false;
+         break;
+      case BSV_MOVIE_CTL_DEINIT:
+         if (bsv_movie_state.movie)
+            bsv_movie_free(bsv_movie_state.movie);
+         bsv_movie_state.movie = NULL;
+         break;
+      case BSV_MOVIE_CTL_INIT:
+         bsv_movie_init_state();
+         break;
+      case BSV_MOVIE_CTL_SET_FRAME_START:
+         bsv_movie_set_frame_start(bsv_movie_state.movie);
+         break;
+      case BSV_MOVIE_CTL_SET_FRAME_END:
+         bsv_movie_set_frame_end(bsv_movie_state.movie);
+         break;
+      case BSV_MOVIE_CTL_FRAME_REWIND:
+         bsv_movie_frame_rewind(bsv_movie_state.movie);
+         break;
+      default:
+         return false;
+   }
+
+   return true;
+}
+
+const char *bsv_movie_get_path(void)
+{
+   return bsv_movie_state.movie_path;
+}
+
+void bsv_movie_set_path(const char *path)
+{
+   strlcpy(bsv_movie_state.movie_path, path, sizeof(bsv_movie_state.movie_path));
+}
+
+void bsv_movie_set_start_path(const char *path)
+{
+   strlcpy(bsv_movie_state.movie_start_path, path,
+         sizeof(bsv_movie_state.movie_start_path));
+}
+
+bool bsv_movie_init_handle(const char *path, enum rarch_movie_type type)
+{
+   bsv_movie_state.movie = bsv_movie_init(path, type);
+   if (!bsv_movie_state.movie)
+      return false;
+   return true;
+}

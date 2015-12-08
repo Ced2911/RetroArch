@@ -25,6 +25,19 @@
 extern "C" {
 #endif
 
+enum rarch_location_ctl_state
+{
+   RARCH_LOCATION_CTL_NONE = 0,
+   RARCH_LOCATION_CTL_DESTROY,
+   RARCH_LOCATION_CTL_DEINIT,
+   RARCH_LOCATION_CTL_SET_OWN_DRIVER,
+   RARCH_LOCATION_CTL_UNSET_OWN_DRIVER,
+   RARCH_LOCATION_CTL_OWNS_DRIVER,
+   RARCH_LOCATION_CTL_SET_ACTIVE,
+   RARCH_LOCATION_CTL_UNSET_ACTIVE,
+   RARCH_LOCATION_CTL_IS_ACTIVE
+};
+
 typedef struct location_driver
 {
    void *(*init)(void);
@@ -124,7 +137,7 @@ void find_location_driver(void);
 
 void init_location(void);
 
-void uninit_location(void);
+bool location_driver_ctl(enum rarch_location_ctl_state state, void *data);
 
 #ifdef __cplusplus
 }

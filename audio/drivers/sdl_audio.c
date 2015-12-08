@@ -13,21 +13,22 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-
-#include "../../driver.h"
-#include <stdlib.h>
-#include <boolean.h>
-#include <stddef.h>
 #include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "SDL.h"
 #include "SDL_audio.h"
-#include <rthreads/rthreads.h>
 
-#include "../../general.h"
+#include <boolean.h>
+#include <rthreads/rthreads.h>
 #include <queues/fifo_buffer.h>
 #include <retro_inline.h>
+
+#include "../audio_driver.h"
+#include "../../configuration.h"
+#include "../../verbosity.h"
 
 typedef struct sdl_audio
 {
@@ -95,7 +96,7 @@ static void *sdl_audio_init(const char *device,
    spec.freq = rate;
    spec.format = AUDIO_S16SYS;
    spec.channels = 2;
-   spec.samples = frames; // This is in audio frames, not samples ... :(
+   spec.samples = frames; /* This is in audio frames, not samples ... :( */
    spec.callback = sdl_audio_cb;
    spec.userdata = sdl;
 

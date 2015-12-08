@@ -27,6 +27,33 @@
 extern "C" {
 #endif
 
+enum rarch_audio_ctl_state
+{
+   RARCH_AUDIO_CTL_NONE = 0,
+   RARCH_AUDIO_CTL_INIT,
+   RARCH_AUDIO_CTL_DEINIT,
+   RARCH_AUDIO_CTL_DESTROY,
+   RARCH_AUDIO_CTL_DESTROY_DATA,
+   RARCH_AUDIO_CTL_START,
+   RARCH_AUDIO_CTL_STOP,
+   RARCH_AUDIO_CTL_FIND_DRIVER,
+   RARCH_AUDIO_CTL_SETUP_REWIND,
+   /* Sets audio monitor refresh rate to new value. */
+   RARCH_AUDIO_CTL_MONITOR_SET_REFRESH_RATE,
+   RARCH_AUDIO_CTL_MONITOR_ADJUST_SYSTEM_RATES,
+   RARCH_AUDIO_CTL_MUTE_TOGGLE,
+   RARCH_AUDIO_CTL_CALLBACK,
+   RARCH_AUDIO_CTL_HAS_CALLBACK,
+   RARCH_AUDIO_CTL_ALIVE,
+   RARCH_AUDIO_CTL_FRAME_IS_REVERSE,
+   RARCH_AUDIO_CTL_SET_OWN_DRIVER,
+   RARCH_AUDIO_CTL_UNSET_OWN_DRIVER,
+   RARCH_AUDIO_CTL_OWNS_DRIVER,
+   RARCH_AUDIO_CTL_SET_ACTIVE,
+   RARCH_AUDIO_CTL_UNSET_ACTIVE,
+   RARCH_AUDIO_CTL_IS_ACTIVE
+};
+
 typedef struct audio_driver
 {
    /* Creates and initializes handle to audio driver.
@@ -72,26 +99,8 @@ typedef struct audio_driver
    size_t (*buffer_size)(void *data);
 } audio_driver_t;
 
-extern audio_driver_t audio_rsound;
-extern audio_driver_t audio_oss;
-extern audio_driver_t audio_alsa;
-extern audio_driver_t audio_alsathread;
-extern audio_driver_t audio_roar;
-extern audio_driver_t audio_openal;
-extern audio_driver_t audio_opensl;
-extern audio_driver_t audio_jack;
-extern audio_driver_t audio_sdl;
-extern audio_driver_t audio_xa;
-extern audio_driver_t audio_pulse;
-extern audio_driver_t audio_dsound;
-extern audio_driver_t audio_coreaudio;
-extern audio_driver_t audio_xenon360;
-extern audio_driver_t audio_ps3;
-extern audio_driver_t audio_gx;
-extern audio_driver_t audio_psp1;
-extern audio_driver_t audio_ctr;
-extern audio_driver_t audio_rwebaudio;
-extern audio_driver_t audio_null;
+
+bool audio_driver_ctl(enum rarch_audio_ctl_state state, void *data);
 
 /**
  * audio_driver_find_handle:
@@ -111,22 +120,7 @@ const void *audio_driver_find_handle(int index);
  **/
 const char *audio_driver_find_ident(int index);
 
-bool audio_driver_mute_toggle(void);
-
-/*
- * audio_driver_readjust_input_rate:
- *
- * Readjust the audio input rate.
- */
-void audio_driver_readjust_input_rate(void);
-
-bool audio_driver_alive(void);
-
-bool audio_driver_start(void);
-
-bool audio_driver_stop(void);
-
-void audio_driver_set_nonblock_state(bool toggle);
+void audio_driver_set_nonblocking_state(bool enable);
 
 /**
  * config_get_audio_driver_options:
@@ -137,13 +131,48 @@ void audio_driver_set_nonblock_state(bool toggle);
  **/
 const char* config_get_audio_driver_options(void);
 
-void find_audio_driver(void);
+void audio_driver_sample(int16_t left, int16_t right);
 
-void uninit_audio(void);
+size_t audio_driver_sample_batch(const int16_t *data, size_t frames);
 
-void init_audio(void);
+void audio_driver_sample_rewind(int16_t left, int16_t right);
 
-ssize_t audio_driver_write(const void *buf, size_t size);
+size_t audio_driver_sample_batch_rewind(const int16_t *data, size_t frames);
+
+void audio_driver_set_volume_gain(float gain);
+
+void audio_driver_dsp_filter_free(void);
+
+void audio_driver_dsp_filter_init(const char *device);
+
+void audio_driver_set_buffer_size(size_t bufsize);
+
+void audio_driver_set_callback(const void *info);
+
+void audio_driver_callback_set_state(bool state);
+
+
+extern audio_driver_t audio_rsound;
+extern audio_driver_t audio_oss;
+extern audio_driver_t audio_alsa;
+extern audio_driver_t audio_alsathread;
+extern audio_driver_t audio_roar;
+extern audio_driver_t audio_openal;
+extern audio_driver_t audio_opensl;
+extern audio_driver_t audio_jack;
+extern audio_driver_t audio_sdl;
+extern audio_driver_t audio_xa;
+extern audio_driver_t audio_pulse;
+extern audio_driver_t audio_dsound;
+extern audio_driver_t audio_coreaudio;
+extern audio_driver_t audio_xenon360;
+extern audio_driver_t audio_ps3;
+extern audio_driver_t audio_gx;
+extern audio_driver_t audio_psp;
+extern audio_driver_t audio_ctr_csnd;
+extern audio_driver_t audio_ctr_dsp;
+extern audio_driver_t audio_rwebaudio;
+extern audio_driver_t audio_null;
 
 #ifdef __cplusplus
 }

@@ -30,17 +30,11 @@
 extern "C" {
 #endif
 
-struct fifo_buffer
-{
-   uint8_t *buffer;
-   size_t bufsize;
-   size_t first;
-   size_t end;
-};
-
 typedef struct fifo_buffer fifo_buffer_t;
 
 fifo_buffer_t *fifo_new(size_t size);
+
+void fifo_clear(fifo_buffer_t *buffer);
 
 void fifo_write(fifo_buffer_t *buffer, const void *in_buf, size_t size);
 

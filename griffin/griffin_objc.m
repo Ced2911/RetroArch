@@ -35,19 +35,16 @@
 
 #if TARGET_OS_IPHONE
 #include "../ui/drivers/cocoa/cocoatouch_menu.m"
-#include "../ui/drivers/cocoa/cocoatouch_browser.m"
 
 #include "../ui/drivers/ui_cocoatouch.m"
 #endif
 
 #elif defined(HAVE_COCOA)
-#include "../ui/drivers/cocoa/cocoa_settings.m"
-
 #include "../ui/drivers/ui_cocoa.m"
 #endif
 
 #endif
 
 #ifdef HAVE_MFI
-#include "../input/drivers_hid/mfi_hid.m"
+#include "../input/drivers_joypad/mfi_joypad.m"
 #endif

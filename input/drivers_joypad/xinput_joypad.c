@@ -21,18 +21,20 @@
  * Some wrappers for other controllers also simulate xinput (as it is easier to implement)
  * so this may be useful for those also.
  **/
-#include "../input_autodetect.h"
-#include "../input_common.h"
-
-#include "../../dylib.h"
-#include "../../general.h"
-#include <boolean.h>
-
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
 
 #include <retro_inline.h>
+#include <dynamic/dylib.h>
+#include <boolean.h>
+
+#include "../input_autodetect.h"
+#include "../input_config.h"
+
+#include "../../general.h"
+#include "../../verbosity.h"
+
 
 /* Check if the definitions do not already exist.
  * Official and mingw xinput headers have different include guards.
@@ -102,7 +104,7 @@ extern int g_xinput_pad_indexes[MAX_USERS];
 extern bool g_xinput_block_pads;
 
 /* For xinput1_n.dll */
-static HINSTANCE g_xinput_dll;
+static dylib_t g_xinput_dll;
 
 /* Function pointer, to be assigned with dylib_proc */
 typedef uint32_t (__stdcall *XInputGetStateEx_t)(uint32_t, XINPUT_STATE*);
@@ -150,12 +152,14 @@ const char *xinput_joypad_name(unsigned pad)
    return XBOX_CONTROLLER_NAMES[xuser];
 }
 
-static bool xinput_joypad_init(void)
+static bool xinput_joypad_init(void *data)
 {
    unsigned i, autoconf_pad;
    XINPUT_STATE dummy_state;
    const char *version = "1.4";
    settings_t *settings = config_get_ptr();
+
+   (void)data;
 
    g_xinput_dll = NULL;
 
@@ -169,11 +173,10 @@ static bool xinput_joypad_init(void)
     * success anyway.
     */
 
-   /* Using dylib_* complicates building joyconfig. */
-   g_xinput_dll = (HINSTANCE)dylib_load("xinput1_4.dll"); 
+   g_xinput_dll = dylib_load("xinput1_4.dll"); 
    if (!g_xinput_dll)
    {
-      g_xinput_dll = (HINSTANCE)dylib_load("xinput1_3.dll");
+      g_xinput_dll = dylib_load("xinput1_3.dll");
       version = "1.3";
    }
 
@@ -238,7 +241,7 @@ static bool xinput_joypad_init(void)
 
    /* We're going to have to be buddies with dinput if we want to be able
     * to use XInput and non-XInput controllers together. */
-   if (!dinput_joypad.init())
+   if (!dinput_joypad.init(data))
    {
       g_xinput_block_pads = false;
       return false;
@@ -455,8 +458,8 @@ static bool xinput_joypad_rumble(unsigned pad,
    else if (effect == RETRO_RUMBLE_WEAK)
       g_xinput_rumble_states[xuser].wRightMotorSpeed = strength;
 
-   return g_XInputSetState(xuser, &g_xinput_rumble_states[xuser]) 
-      == ERROR_SUCCESS;
+   return (g_XInputSetState(xuser, &g_xinput_rumble_states[xuser]) 
+      == 0);
 }
 
 input_device_driver_t xinput_joypad = {

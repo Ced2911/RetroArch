@@ -20,6 +20,8 @@
 #include <stddef.h>
 #include <boolean.h>
 
+#include <file/file_list.h>
+
 #ifdef HAVE_CONFIG_H
 #include "../config.h"
 #endif
@@ -38,7 +40,10 @@ typedef struct ui_companion_driver
    void (*toggle)(void *data);
    void (*event_command)(void *data, enum event_command action);
    void (*notify_content_loaded)(void *data);
-
+   void (*notify_list_loaded)(void *data, file_list_t *list, file_list_t *menu_list);
+   void (*notify_refresh)(void *data);
+   void (*msg_queue_push)(const char *msg, unsigned priority, unsigned duration, bool flush);
+   void (*render_messagebox)(const char *msg);
    const char *ident;
 } ui_companion_driver_t;
 
@@ -46,6 +51,7 @@ extern const ui_companion_driver_t ui_companion_null;
 extern const ui_companion_driver_t ui_companion_cocoa;
 extern const ui_companion_driver_t ui_companion_cocoatouch;
 extern const ui_companion_driver_t ui_companion_qt;
+extern const ui_companion_driver_t ui_companion_win32;
 
 /**
  * ui_companion_find_driver:
@@ -68,7 +74,23 @@ const ui_companion_driver_t *ui_companion_get_ptr(void);
  **/
 const ui_companion_driver_t *ui_companion_init_first(void);
 
+void ui_companion_driver_init_first(void);
+
+bool ui_companion_is_on_foreground(void);
+
+void ui_companion_set_foreground(unsigned enable);
+
 void ui_companion_event_command(enum event_command action);
+
+void ui_companion_driver_deinit(void);
+
+void ui_companion_driver_notify_refresh(void);
+
+void ui_companion_driver_notify_list_loaded(file_list_t *list, file_list_t *menu_list);
+
+void ui_companion_driver_notify_content_loaded(void);
+
+void ui_companion_driver_free(void);
 
 #ifdef __cplusplus
 }

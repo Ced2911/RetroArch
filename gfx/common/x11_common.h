@@ -21,7 +21,7 @@
 #include "../../config.h"
 #endif
 
-#include "../video_context_driver.h"
+#include <signal.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -33,6 +33,14 @@
 
 #include <boolean.h>
 
+#include "../video_context_driver.h"
+
+extern Window   g_x11_win;
+extern Display *g_x11_dpy;
+extern Colormap g_x11_cmap;
+extern unsigned g_x11_screen;
+
+void x11_save_last_used_monitor(Window win);
 void x11_show_mouse(Display *dpy, Window win, bool state);
 void x11_windowed_fullscreen(Display *dpy, Window win);
 void x11_suspend_screensaver(Window win);
@@ -57,6 +65,35 @@ void x11_handle_key_event(XEvent *event, XIC ic, bool filter);
 
 bool x11_get_metrics(void *data,
       enum display_metric_types type, float *value);
+
+void x11_check_window(void *data, bool *quit,
+   bool *resize, unsigned *width, unsigned *height, unsigned frame_count);
+
+void x11_get_video_size(void *data, unsigned *width, unsigned *height);
+
+bool x11_has_focus(void *data);
+
+bool x11_has_focus_internal(void *data);
+
+bool x11_alive(void *data);
+
+void x11_install_sighandlers(void);
+
+bool x11_connect(void);
+
+void x11_update_window_title(void *data);
+
+bool x11_input_ctx_new(bool true_full);
+
+void x11_input_ctx_destroy(void);
+
+void x11_window_destroy(bool fullscreen);
+
+void x11_colormap_destroy(void);
+
+void x11_install_quit_atom(void);
+
+void x11_event_queue_check(XEvent *event);
 
 #endif
 

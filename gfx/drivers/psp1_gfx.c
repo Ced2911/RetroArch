@@ -22,11 +22,10 @@
 #include <psprtc.h>
 
 #include <retro_inline.h>
-#include "psp_sdk_defines.h"
+
+#include "../../defines/psp_defines.h"
 #include "../../general.h"
 #include "../../driver.h"
-#include "../video_viewport.h"
-#include "../video_monitor.h"
 
 #ifndef SCEGU_SCR_WIDTH
 #define SCEGU_SCR_WIDTH 480
@@ -257,7 +256,6 @@ static void *psp_init(const video_info_t *video,
    int pixel_format, lut_pixel_format, lut_block_count;
    unsigned int red_shift, color_mask;
    void *displayBuffer, *LUT_r, *LUT_b;
-   global_t *global         = global_get_ptr();
    psp1_video_t *psp        = (psp1_video_t*)calloc(1, sizeof(psp1_video_t));
 
    if (!psp)
@@ -356,7 +354,7 @@ static void *psp_init(const video_info_t *video,
       psp->bpp_log2         = 1;
 
       pixel_format          = 
-         (global->system.pix_fmt == RETRO_PIXEL_FORMAT_0RGB1555) 
+         (video_driver_get_pixel_format() == RETRO_PIXEL_FORMAT_0RGB1555) 
          ? GU_PSM_5551 : GU_PSM_5650 ;
 
       lut_pixel_format      = GU_PSM_T16;
@@ -456,24 +454,25 @@ static void *psp_init(const video_info_t *video,
    psp->hw_render          = false;
 
    return psp;
-error:
-   RARCH_ERR("PSP1 video could not be initialized.\n");
-   return (void*)-1;
 }
 
 //#define DISPLAY_FPS
 
 static bool psp_frame(void *data, const void *frame,
-      unsigned width, unsigned height, unsigned pitch, const char *msg)
+      unsigned width, unsigned height, uint64_t frame_count,
+      unsigned pitch, const char *msg)
 {
-   static char fps_txt[128], fps_text_buf[128];
-   psp1_video_t *psp = (psp1_video_t*)data;
-   settings_t *settings = config_get_ptr();
 #ifdef DISPLAY_FPS
+   uint32_t diff;
    static uint64_t currentTick,lastTick;
-   static float fps=0.0;
    static int frames;
+   static float fps                        = 0.0;
 #endif
+   static struct retro_perf_counter psp_frame_run = {0};
+   static char fps_txt[128]                = {0};
+   static char fps_text_buf[128]           = {0};
+   psp1_video_t *psp                       = (psp1_video_t*)data;
+   settings_t *settings                    = config_get_ptr();
 
    if (!width || !height)
       return false;
@@ -512,7 +511,7 @@ static bool psp_frame(void *data, const void *frame,
 #ifdef DISPLAY_FPS
    frames++;
    sceRtcGetCurrentTick(&currentTick);
-   uint32_t diff = currentTick - lastTick;
+   diff = currentTick - lastTick;
    if(diff > 1000000)
    {
       fps = (float)frames * 1000000.0 / diff;
@@ -526,8 +525,8 @@ static bool psp_frame(void *data, const void *frame,
 
    psp->draw_buffer = FROM_GU_POINTER(sceGuSwapBuffers());
 
-   RARCH_PERFORMANCE_INIT(psp_frame_run);
-   RARCH_PERFORMANCE_START(psp_frame_run);
+   rarch_perf_init(&psp_frame_run, "psp_frame_run");
+   retro_perf_start(&psp_frame_run);
 
    if (psp->should_resize)
       psp_update_viewport(psp);
@@ -560,7 +559,7 @@ static bool psp_frame(void *data, const void *frame,
 
    sceGuFinish();
 
-   RARCH_PERFORMANCE_STOP(psp_frame_run);
+   retro_perf_stop(&psp_frame_run);
 
    if(psp->menu.active)
    {
@@ -644,7 +643,7 @@ static void psp_set_texture_frame(void *data, const void *frame, bool rgb32,
 
 #ifdef DEBUG
    /* psp->menu.frame buffer size is (480 * 272)*2 Bytes */
-   rarch_assert((width*height) < (480 * 272));
+   retro_assert((width*height) < (480 * 272));
 #endif
 
    psp_set_screen_coords(psp->menu.frame_coords, 0, 0,
@@ -696,25 +695,21 @@ static void psp_update_viewport(psp1_video_t* psp)
    float width          = SCEGU_SCR_WIDTH;
    float height         = SCEGU_SCR_HEIGHT;
    settings_t *settings = config_get_ptr();
-   global_t   *global   = global_get_ptr();
 
    if (settings->video.scale_integer)
    {
       video_viewport_get_scaled_integer(&psp->vp, SCEGU_SCR_WIDTH,
-            SCEGU_SCR_HEIGHT, global->system.aspect_ratio, psp->keep_aspect);
+            SCEGU_SCR_HEIGHT, video_driver_get_aspect_ratio(), psp->keep_aspect);
       width  = psp->vp.width;
       height = psp->vp.height;
    }
    else if (psp->keep_aspect)
    {
-      float delta;
-      float desired_aspect = global->system.aspect_ratio;
 
 #if defined(HAVE_MENU)
       if (settings->video.aspect_ratio_idx == ASPECT_RATIO_CUSTOM)
       {
-         const struct video_viewport *custom = 
-            &global->console.screen.viewports.custom_vp;
+         struct video_viewport *custom = video_viewport_get_custom();
 
          if (custom)
          {
@@ -727,6 +722,9 @@ static void psp_update_viewport(psp1_video_t* psp)
       else
 #endif
       {
+         float delta;
+         float desired_aspect = video_driver_get_aspect_ratio();
+
          if ((fabsf(device_aspect - desired_aspect) < 0.0001f)
                || (fabsf((16.0/9.0) - desired_aspect) < 0.02f))
          {
@@ -791,32 +789,33 @@ static void psp_set_filtering(void *data, unsigned index, bool smooth)
       psp->tex_filter = smooth? GU_LINEAR : GU_NEAREST;
 }
 
-static void psp_set_aspect_ratio(void *data, unsigned aspectratio_index)
+static void psp_set_aspect_ratio(void *data, unsigned aspect_ratio_idx)
 {
    psp1_video_t *psp = (psp1_video_t*)data;
-   global_t *global  = global_get_ptr();
+   enum rarch_display_ctl_state cmd = RARCH_DISPLAY_CTL_NONE;
 
-   switch (aspectratio_index)
+   switch (aspect_ratio_idx)
    {
       case ASPECT_RATIO_SQUARE:
-         video_viewport_set_square_pixel(
-               global->system.av_info.geometry.base_width, 
-               global->system.av_info.geometry.base_height);
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_SQUARE_PIXEL;
          break;
 
       case ASPECT_RATIO_CORE:
-         video_viewport_set_core();
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_CORE;
          break;
 
       case ASPECT_RATIO_CONFIG:
-         video_viewport_set_config();
+         cmd = RARCH_DISPLAY_CTL_SET_VIEWPORT_CONFIG;
          break;
 
       default:
          break;
    }
 
-   global->system.aspect_ratio = aspectratio_lut[aspectratio_index].value;
+   if (cmd != RARCH_DISPLAY_CTL_NONE)
+      video_driver_ctl(cmd, NULL);
+
+   video_driver_set_aspect_ratio_value(aspectratio_lut[aspect_ratio_idx].value);
 
    psp->keep_aspect = true;
    psp->should_resize = true;
@@ -844,10 +843,8 @@ static const video_poke_interface_t psp_poke_interface = {
    NULL, /* get_video_output_size */
    NULL, /* get_video_output_prev */
    NULL, /* get_video_output_next */
-#ifdef HAVE_FBO
-   NULL,
-#endif
-   NULL,
+   NULL, /* get_current_framebuffer */
+   NULL, /* get_proc_address */
    psp_set_aspect_ratio,
    psp_apply_state_changes,
 #ifdef HAVE_MENU
@@ -971,7 +968,7 @@ video_driver_t video_psp1 = {
    psp_set_shader,
    psp_free,
    "psp1",
-
+   NULL, /* set_viewport */
    psp_set_rotation,
    psp_viewport_info,
    psp_read_viewport,

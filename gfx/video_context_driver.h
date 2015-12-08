@@ -18,7 +18,8 @@
 #define __VIDEO_CONTEXT_DRIVER_H
 
 #include <boolean.h>
-#include "../driver.h"
+
+#include "video_driver.h"
 
 #ifdef HAVE_CONFIG_H
 #include "../config.h"
@@ -34,6 +35,7 @@ extern "C" {
 
 enum gfx_ctx_api
 {
+   GFX_CTX_NONE = 0,
    GFX_CTX_OPENGL_API,
    GFX_CTX_OPENGL_ES_API,
    GFX_CTX_DIRECT3D8_API,
@@ -46,7 +48,7 @@ enum display_metric_types
    DISPLAY_METRIC_NONE = 0,
    DISPLAY_METRIC_MM_WIDTH,
    DISPLAY_METRIC_MM_HEIGHT,
-   DISPLAY_METRIC_DPI,
+   DISPLAY_METRIC_DPI
 };
 
 typedef void (*gfx_ctx_proc_t)(void);
@@ -163,6 +165,7 @@ extern const gfx_ctx_driver_t gfx_ctx_ps3;
 extern const gfx_ctx_driver_t gfx_ctx_wgl;
 extern const gfx_ctx_driver_t gfx_ctx_videocore;
 extern const gfx_ctx_driver_t gfx_ctx_bbqnx;
+extern const gfx_ctx_driver_t gfx_ctx_cgl;
 extern const gfx_ctx_driver_t gfx_ctx_cocoagl;
 extern const gfx_ctx_driver_t gfx_ctx_emscripten;
 extern const gfx_ctx_driver_t gfx_ctx_null;
@@ -239,9 +242,9 @@ void gfx_ctx_bind_hw_render(void *data, bool enable);
 void gfx_ctx_get_video_output_size(void *data,
       unsigned *width, unsigned *height);
 
-void gfx_ctx_get_video_output_prev(void *data);
+bool gfx_ctx_get_video_output_prev(void *data);
 
-void gfx_ctx_get_video_output_next(void *data);
+bool gfx_ctx_get_video_output_next(void *data);
 
 const char *gfx_ctx_get_ident(void);
 
@@ -251,6 +254,16 @@ void gfx_ctx_input_driver(void *data,
       const input_driver_t **input, void **input_data);
 
 retro_proc_address_t gfx_ctx_get_proc_address(const char *sym);
+
+void *gfx_ctx_data_get_ptr(void);
+
+void gfx_ctx_data_set(void *ptr);
+
+void gfx_ctx_free_data(void);
+
+void gfx_ctx_set(const gfx_ctx_driver_t *ctx_driver);
+
+void gfx_ctx_destroy(const gfx_ctx_driver_t *ctx_driver);
 
 #ifdef __cplusplus
 }

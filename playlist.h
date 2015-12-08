@@ -24,21 +24,11 @@
 extern "C" {
 #endif
 
-typedef struct content_playlist_entry
-{
-   char *path;
-   char *core_path;
-   char *core_name;
-} content_playlist_entry_t;
+typedef struct content_playlist_entry content_playlist_entry_t;
+typedef struct content_playlist       content_playlist_t;
 
-typedef struct content_playlist
-{
-   struct content_playlist_entry *entries;
-   size_t size;
-   size_t cap;
-
-   char *conf_path;
-} content_playlist_t;
+typedef int (content_playlist_sort_fun_t)(const content_playlist_entry_t *a,
+      const content_playlist_entry_t *b);
 
 /**
  * content_playlist_init:
@@ -76,6 +66,8 @@ void content_playlist_clear(content_playlist_t *playlist);
  **/
 size_t content_playlist_size(content_playlist_t *playlist);
 
+const char *content_playlist_entry_get_label(const content_playlist_entry_t *entry);
+
 /**
  * content_playlist_get_index:
  * @playlist        	   : Playlist handle.
@@ -87,9 +79,11 @@ size_t content_playlist_size(content_playlist_t *playlist);
  * Gets values of playlist index: 
  **/
 void content_playlist_get_index(content_playlist_t *playlist,
-      size_t index,
-      const char **path, const char **core_path,
-      const char **core_name);
+      size_t idx,
+      const char **path, const char **label,
+      const char **core_path, const char **core_name,
+      const char **db_name,
+      const char **crc32);
 
 /**
  * content_playlist_push:
@@ -101,13 +95,27 @@ void content_playlist_get_index(content_playlist_t *playlist,
  * Push entry to top of playlist.
  **/
 void content_playlist_push(content_playlist_t *playlist,
-      const char *path, const char *core_path,
-      const char *core_name);
+      const char *path, const char *label,
+      const char *core_path, const char *core_name,
+      const char *db_name,
+      const char *crc32);
+
+void content_playlist_update(content_playlist_t *playlist, size_t idx,
+      const char *path, const char *label,
+      const char *core_path, const char *core_name,
+      const char *db_name,
+      const char *crc32);
 
 void content_playlist_get_index_by_path(content_playlist_t *playlist,
       const char *search_path,
-      char **path, char **core_path,
-      char **core_name);
+      char **path, char **label,
+      char **core_path, char **core_name,
+      char **db_name,
+      char **crc32);
+
+void content_playlist_write_file(content_playlist_t *playlist);
+
+void content_playlist_qsort(content_playlist_t *playlist, content_playlist_sort_fun_t *fn);
 
 #ifdef __cplusplus
 }

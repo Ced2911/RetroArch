@@ -20,18 +20,11 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <file/config_file.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <errno.h>
-#include <compat/strl.h>
-#include <compat/posix_string.h>
-#include <compat/msvc.h>
-#include <file/file_path.h>
-#include <retro_miscellaneous.h>
-#include <string/string_list.h>
 
 #if !defined(_WIN32) && !defined(__CELLOS_LV2__) && !defined(_XBOX)
 #include <sys/param.h> /* PATH_MAX */
@@ -42,8 +35,45 @@
 #include <xtl.h>
 #endif
 
+#include <retro_miscellaneous.h>
+#include <compat/strl.h>
+#include <compat/posix_string.h>
+#include <compat/msvc.h>
+#include <file/config_file.h>
+#include <file/file_path.h>
+#include <retro_stat.h>
+#include <string/string_list.h>
+#include <rhash.h>
+
 #define MAX_INCLUDE_DEPTH 16
 
+struct config_entry_list
+{
+   /* If we got this from an #include,
+    * do not allow overwrite. */
+   bool readonly;
+   char *key;
+   char *value;
+   uint32_t key_hash;
+
+   struct config_entry_list *next;
+};
+
+struct config_include_list
+{
+   char *path;
+   struct config_include_list *next;
+};
+
+struct config_file
+{
+   char *path;
+   struct config_entry_list *entries;
+   struct config_entry_list *tail;
+   unsigned include_depth;
+
+   struct config_include_list *includes;
+};
 
 static config_file_t *config_file_new_internal(const char *path, unsigned depth);
 void config_file_free(config_file_t *conf);
@@ -52,9 +82,9 @@ static char *getaline(FILE *file)
 {
    char* newline = (char*)malloc(9);
    char* newline_tmp = NULL;
-   size_t cur_size = 8;
-   size_t idx = 0;
-   int in = getc(file);
+   size_t cur_size   = 8;
+   size_t idx        = 0;
+   int in            = getc(file);
 
    if (!newline)
       return NULL;
@@ -84,11 +114,12 @@ static char *getaline(FILE *file)
 
 static char *extract_value(char *line, bool is_value)
 {
-   char *save = NULL, *tok = NULL;
+   char *save = NULL;
+   char *tok  = NULL;
 
    if (is_value)
    {
-      while (isspace(*line))
+      while (isspace((int)*line))
          line++;
 
       /* If we don't have an equal sign here,
@@ -99,7 +130,7 @@ static char *extract_value(char *line, bool is_value)
       line++;
    }
 
-   while (isspace(*line))
+   while (isspace((int)*line))
       line++;
 
    /* We have a full string. Read until next ". */
@@ -187,9 +218,10 @@ static void add_include_list(config_file_t *conf, const char *path)
 
 static void add_sub_conf(config_file_t *conf, char *line)
 {
-   char real_path[PATH_MAX_LENGTH];
-   config_file_t *sub_conf = NULL;
-   char *path = extract_value(line, false);
+   char real_path[PATH_MAX_LENGTH] = {0};
+   config_file_t         *sub_conf = NULL;
+   char                      *path = extract_value(line, false);
+
    if (!path)
       return;
 
@@ -268,11 +300,11 @@ static char *strip_comment(char *str)
 static bool parse_line(config_file_t *conf,
       struct config_entry_list *list, char *line)
 {
-   char* comment = NULL;
-   char* key = (char*)malloc(9);
-   char* key_tmp = NULL;
+   char *comment   = NULL;
+   char *key       = (char*)malloc(9);
+   char *key_tmp   = NULL;
    size_t cur_size = 8;
-   size_t idx = 0;
+   size_t idx      = 0;
 
    if (!key)
       return false;
@@ -302,10 +334,10 @@ static bool parse_line(config_file_t *conf,
    }
 
    /* Skips to first character. */
-   while (isspace(*line))
+   while (isspace((int)*line))
       line++;
 
-   while (isgraph(*line))
+   while (isgraph((int)*line))
    {
       if (idx == cur_size)
       {
@@ -325,6 +357,7 @@ static bool parse_line(config_file_t *conf,
    }
    key[idx] = '\0';
    list->key = key;
+   list->key_hash = djb2_calculate(key);
 
    list->value = extract_value(line, true);
    if (!list->value)
@@ -362,15 +395,15 @@ static config_file_t *config_file_new_internal(
    if (!conf)
       return NULL;
 
-   if (!path)
+   if (!path || !*path)
       return conf;
+
+   if (path_is_directory(path))
+      goto error;
 
    conf->path = strdup(path);
    if (!conf->path)
-   {
-      free(conf);
-      return NULL;
-   }
+      goto error;
 
    conf->include_depth = depth;
    file = fopen(path, "r");
@@ -378,8 +411,7 @@ static config_file_t *config_file_new_internal(
    if (!file)
    {
       free(conf->path);
-      free(conf);
-      return NULL;
+      goto error;
    }
 
    while (!feof(file))
@@ -411,13 +443,24 @@ static config_file_t *config_file_new_internal(
 
          free(line);
       }
+      else
+      {
+         free(list);
+         continue;
+      }
 
       if (list != conf->tail)
          free(list);
    }
+
    fclose(file);
 
    return conf;
+
+error:
+   free(conf);
+
+   return NULL;
 }
 
 config_file_t *config_file_new_from_string(const char *from_string)
@@ -510,178 +553,162 @@ void config_file_free(config_file_t *conf)
    free(conf);
 }
 
+static struct config_entry_list *config_get_entry(const config_file_t *conf,
+      const char *key, struct config_entry_list **prev)
+{
+   struct config_entry_list *entry;
+   struct config_entry_list *previous = NULL;
+
+   uint32_t hash = djb2_calculate(key);
+
+   if (prev)
+      previous = *prev;
+
+   for (entry = conf->entries; entry; entry = entry->next)
+   {
+      if (hash == entry->key_hash && !strcmp(key, entry->key))
+         return entry;
+
+      previous = entry;
+   }
+
+   if (prev)
+      *prev = previous;
+
+   return NULL;
+}
+
 bool config_get_double(config_file_t *conf, const char *key, double *in)
 {
-   struct config_entry_list *list = conf->entries;
+   const struct config_entry_list *entry = config_get_entry(conf, key, NULL);
 
-   while (list)
-   {
-      if (strcmp(key, list->key) == 0)
-      {
-         *in = strtod(list->value, NULL);
-         return true;
-      }
-      list = list->next;
-   }
-   return false;
+   if (entry)
+      *in = strtod(entry->value, NULL);
+
+   return entry != NULL;
 }
 
 bool config_get_float(config_file_t *conf, const char *key, float *in)
 {
-   struct config_entry_list *list = conf->entries;
+   const struct config_entry_list *entry = config_get_entry(conf, key, NULL);
 
-   while (list)
+   if (entry)
    {
-      if (strcmp(key, list->key) == 0)
-      {
-         /* strtof() is C99/POSIX. Just use the more portable kind. */
-         *in = (float)strtod(list->value, NULL);
-         return true;
-      }
-      list = list->next;
+      /* strtof() is C99/POSIX. Just use the more portable kind. */
+      *in = (float)strtod(entry->value, NULL);
    }
-   return false;
+
+   return entry != NULL;
 }
 
 bool config_get_int(config_file_t *conf, const char *key, int *in)
 {
-   struct config_entry_list *list = conf->entries;
+   const struct config_entry_list *entry = config_get_entry(conf, key, NULL);
+   errno = 0;
 
-   while (list)
+   if (entry)
    {
-      if (strcmp(key, list->key) == 0)
-      {
-         int val;
-         errno = 0;
-         val = strtol(list->value, NULL, 0);
-         if (errno == 0)
-         {
-            *in = val;
-            return true;
-         }
-         return false;
-      }
-      list = list->next;
+      int val = strtol(entry->value, NULL, 0);
+
+      if (errno == 0)
+         *in = val;
    }
-   return false;
+
+   return entry != NULL && errno == 0;
 }
 
+#if defined(__STDC_VERSION__) && __STDC_VERSION__>=199901L
 bool config_get_uint64(config_file_t *conf, const char *key, uint64_t *in)
 {
-   struct config_entry_list *list = conf->entries;
+   const struct config_entry_list *entry = config_get_entry(conf, key, NULL);
+   errno = 0;
 
-   while (list)
+   if (entry)
    {
-      if (strcmp(key, list->key) == 0)
-      {
-         uint64_t val;
-         errno = 0;
-         val = strtoull(list->value, NULL, 0);
-         if (errno == 0)
-         {
-            *in = val;
-            return true;
-         }
-         return false;
-      }
-      list = list->next;
+      uint64_t val = strtoull(entry->value, NULL, 0);
+
+      if (errno == 0)
+         *in = val;
    }
-   return false;
+
+   return entry != NULL && errno == 0;
 }
+#endif
 
 bool config_get_uint(config_file_t *conf, const char *key, unsigned *in)
 {
-   struct config_entry_list *list = conf->entries;
+   const struct config_entry_list *entry = config_get_entry(conf, key, NULL);
+   errno = 0;
 
-   while (list != NULL)
+   if (entry)
    {
-      if (strcmp(key, list->key) == 0)
-      {
-         unsigned val;
-         errno = 0;
-         val = strtoul(list->value, NULL, 0);
-         if (errno == 0)
-         {
-            *in = val;
-            return true;
-         }
-         return false;
-      }
-      list = list->next;
+      unsigned val = strtoul(entry->value, NULL, 0);
+
+      if (errno == 0)
+         *in = val;
    }
 
-   return false;
+   return entry != NULL && errno == 0;
 }
 
 bool config_get_hex(config_file_t *conf, const char *key, unsigned *in)
 {
-   struct config_entry_list *list = conf->entries;
+   const struct config_entry_list *entry = config_get_entry(conf, key, NULL);
+   errno = 0;
 
-   while (list)
+   if (entry)
    {
-      if (strcmp(key, list->key) == 0)
-      {
-         unsigned val;
-         errno = 0;
-         val = strtoul(list->value, NULL, 16);
-         if (errno == 0)
-         {
-            *in = val;
-            return true;
-         }
-         return false;
-      }
-      list = list->next;
+      unsigned val = strtoul(entry->value, NULL, 16);
+
+      if (errno == 0)
+         *in = val;
    }
-   return false;
+
+   return entry != NULL && errno == 0;
 }
 
 bool config_get_char(config_file_t *conf, const char *key, char *in)
 {
-   struct config_entry_list *list = conf->entries;
+   const struct config_entry_list *entry = config_get_entry(conf, key, NULL);
 
-   while (list)
+   if (entry)
    {
-      if (strcmp(key, list->key) == 0)
-      {
-         if (list->value[0] && list->value[1])
-            return false;
-         *in = *list->value;
-         return true;
-      }
-      list = list->next;
+      if (entry->value[0] && entry->value[1])
+         return false;
+
+      *in = *entry->value;
    }
-   return false;
+
+   return entry != NULL;
 }
 
 bool config_get_string(config_file_t *conf, const char *key, char **str)
 {
-   struct config_entry_list *list = conf->entries;
+   const struct config_entry_list *entry = config_get_entry(conf, key, NULL);
 
-   while (list)
-   {
-      if (strcmp(key, list->key) == 0)
-      {
-         *str = strdup(list->value);
-         return true;
-      }
-      list = list->next;
-   }
-   return false;
+   if (entry)
+      *str = strdup(entry->value);
+
+   return entry != NULL;
+}
+
+bool config_get_config_path(config_file_t *conf, char *s, size_t len)
+{
+   if (!conf)
+      return false;
+
+   return strlcpy(s, conf->path, len);
 }
 
 bool config_get_array(config_file_t *conf, const char *key,
       char *buf, size_t size)
 {
-   struct config_entry_list *list = conf->entries;
+   const struct config_entry_list *entry = config_get_entry(conf, key, NULL);
 
-   while (list)
-   {
-      if (strcmp(key, list->key) == 0)
-         return strlcpy(buf, list->value, size) < size;
-      list = list->next;
-   }
-   return false;
+   if (entry)
+      return strlcpy(buf, entry->value, size) < size;
+
+   return entry != NULL;
 }
 
 bool config_get_path(config_file_t *conf, const char *key,
@@ -690,77 +717,60 @@ bool config_get_path(config_file_t *conf, const char *key,
 #if defined(RARCH_CONSOLE)
    return config_get_array(conf, key, buf, size);
 #else
-   struct config_entry_list *list = conf->entries;
+   const struct config_entry_list *entry = config_get_entry(conf, key, NULL);
 
-   while (list)
-   {
-      if (strcmp(key, list->key) == 0)
-      {
-         fill_pathname_expand_special(buf, list->value, size);
-         return true;
-      }
-      list = list->next;
-   }
-   return false;
+   if (entry)
+      fill_pathname_expand_special(buf, entry->value, size);
+
+   return entry != NULL;
 #endif
 }
 
 bool config_get_bool(config_file_t *conf, const char *key, bool *in)
 {
-   struct config_entry_list *list = conf->entries;
+   const struct config_entry_list *entry = config_get_entry(conf, key, NULL);
 
-   while (list)
+   if (entry)
    {
-      if (strcmp(key, list->key) == 0)
-      {
-         if (strcasecmp(list->value, "true") == 0)
-            *in = true;
-         else if (strcasecmp(list->value, "1") == 0)
-            *in = true;
-         else if (strcasecmp(list->value, "false") == 0)
-            *in = false;
-         else if (strcasecmp(list->value, "0") == 0)
-            *in = false;
-         else
-            return false;
-
-         return true;
-      }
-      list = list->next;
+      if (strcasecmp(entry->value, "true") == 0)
+         *in = true;
+      else if (strcasecmp(entry->value, "1") == 0)
+         *in = true;
+      else if (strcasecmp(entry->value, "false") == 0)
+         *in = false;
+      else if (strcasecmp(entry->value, "0") == 0)
+         *in = false;
+      else
+         return false;
    }
-   return false;
+
+   return entry != NULL;
 }
 
 void config_set_string(config_file_t *conf, const char *key, const char *val)
 {
-   struct config_entry_list *elem = NULL;
-   struct config_entry_list *list = conf->entries;
-   struct config_entry_list *last = list;
-   while (list)
-   {
-      if (!list->readonly && (strcmp(key, list->key) == 0))
-      {
-         free(list->value);
-         list->value = strdup(val);
-         return;
-      }
+   struct config_entry_list *last  = conf->entries;
+   struct config_entry_list *entry = config_get_entry(conf, key, &last);
 
-      last = list;
-      list = list->next;
+   if (entry && !entry->readonly)
+   {
+      free(entry->value);
+      entry->value = strdup(val);
+      return;
    }
 
-   elem = (struct config_entry_list*)calloc(1, sizeof(*elem));
+   entry = (struct config_entry_list*)calloc(1, sizeof(*entry));
 
-   if (!elem)
+   if (!entry)
       return;
 
-   elem->key = strdup(key);
-   elem->value = strdup(val);
+   entry->key   = strdup(key);
+   entry->value = strdup(val);
 
    if (last)
-      last->next = elem;
+      last->next = entry;
    else
-      conf->entries = elem;
+      conf->entries = entry;
 }
 
 void config_set_path(config_file_t *conf, const char *entry, const char *val)
@@ -768,7 +778,7 @@ void config_set_path(config_file_t *conf, const char *entry, const char *val)
 #if defined(RARCH_CONSOLE)
    config_set_string(conf, entry, val);
 #else
-   char buf[PATH_MAX_LENGTH];
+   char buf[PATH_MAX_LENGTH] = {0};
    fill_pathname_abbreviate_special(buf, val, sizeof(buf));
    config_set_string(conf, entry, buf);
 #endif
@@ -776,7 +786,7 @@ void config_set_path(config_file_t *conf, const char *entry, const char *val)
 
 void config_set_double(config_file_t *conf, const char *key, double val)
 {
-   char buf[128];
+   char buf[128] = {0};
 #ifdef __cplusplus
    snprintf(buf, sizeof(buf), "%f", (float)val);
 #else
@@ -787,28 +797,28 @@ void config_set_double(config_file_t *conf, const char *key, double val)
 
 void config_set_float(config_file_t *conf, const char *key, float val)
 {
-   char buf[128];
+   char buf[128] = {0};
    snprintf(buf, sizeof(buf), "%f", val);
    config_set_string(conf, key, buf);
 }
 
 void config_set_int(config_file_t *conf, const char *key, int val)
 {
-   char buf[128];
+   char buf[128] = {0};
    snprintf(buf, sizeof(buf), "%d", val);
    config_set_string(conf, key, buf);
 }
 
 void config_set_hex(config_file_t *conf, const char *key, unsigned val)
 {
-   char buf[128];
+   char buf[128] = {0};
    snprintf(buf, sizeof(buf), "%x", val);
    config_set_string(conf, key, buf);
 }
 
 void config_set_uint64(config_file_t *conf, const char *key, uint64_t val)
 {
-   char buf[128];
+   char buf[128] = {0};
 #ifdef _WIN32
    snprintf(buf, sizeof(buf), "%I64u", val);
 #else
@@ -819,7 +829,7 @@ void config_set_uint64(config_file_t *conf, const char *key, uint64_t val)
 
 void config_set_char(config_file_t *conf, const char *key, char val)
 {
-   char buf[2];
+   char buf[2] = {0};
    snprintf(buf, sizeof(buf), "%c", val);
    config_set_string(conf, key, buf);
 }
@@ -875,7 +885,7 @@ bool config_entry_exists(config_file_t *conf, const char *entry)
 
    while (list)
    {
-      if (strcmp(entry, list->key) == 0)
+      if (!strcmp(entry, list->key))
          return true;
       list = list->next;
    }
@@ -887,6 +897,7 @@ bool config_get_entry_list_head(config_file_t *conf,
       struct config_file_entry *entry)
 {
    const struct config_entry_list *head = conf->entries;
+
    if (!head)
       return false;
 
@@ -899,6 +910,7 @@ bool config_get_entry_list_head(config_file_t *conf,
 bool config_get_entry_list_next(struct config_file_entry *entry)
 {
    const struct config_entry_list *next = entry->next;
+
    if (!next)
       return false;
 

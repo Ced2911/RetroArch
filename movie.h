@@ -40,13 +40,43 @@ enum rarch_movie_type
    RARCH_MOVIE_RECORD
 };
 
+enum bsv_ctl_state
+{
+   BSV_MOVIE_CTL_IS_INITED = 0,
+   BSV_MOVIE_CTL_PLAYBACK_ON,
+   BSV_MOVIE_CTL_PLAYBACK_OFF,
+   BSV_MOVIE_CTL_SET_START_RECORDING,
+   BSV_MOVIE_CTL_UNSET_START_RECORDING,
+   BSV_MOVIE_CTL_START_RECORDING,
+   BSV_MOVIE_CTL_SET_START_PLAYBACK,
+   BSV_MOVIE_CTL_UNSET_START_PLAYBACK,
+   BSV_MOVIE_CTL_START_PLAYBACK,
+   BSV_MOVIE_CTL_UNSET_PLAYBACK,
+   BSV_MOVIE_CTL_SET_FRAME_START,
+   BSV_MOVIE_CTL_SET_FRAME_END,
+   BSV_MOVIE_CTL_FRAME_REWIND,
+   BSV_MOVIE_CTL_DEINIT,
+   BSV_MOVIE_CTL_INIT,
+   BSV_MOVIE_CTL_END_EOF,
+   BSV_MOVIE_CTL_SET_END_EOF,
+   BSV_MOVIE_CTL_END,
+   BSV_MOVIE_CTL_SET_END,
+   BSV_MOVIE_CTL_UNSET_END
+};
+
+const char *bsv_movie_get_path(void);
+
+void bsv_movie_set_path(const char *path);
+
+void bsv_movie_set_start_path(const char *path);
+
 bsv_movie_t *bsv_movie_init(const char *path, enum rarch_movie_type type);
 
 /* Playback. */
-bool bsv_movie_get_input(bsv_movie_t *handle, int16_t *input);
+bool bsv_movie_get_input(int16_t *input);
 
 /* Recording. */
-void bsv_movie_set_input(bsv_movie_t *handle, int16_t input);
+void bsv_movie_set_input(int16_t input);
 
 /* Used for rewinding while playback/record. */
 void bsv_movie_set_frame_start(bsv_movie_t *handle);
@@ -56,6 +86,10 @@ void bsv_movie_set_frame_end(bsv_movie_t *handle);
 void bsv_movie_frame_rewind(bsv_movie_t *handle);
 
 void bsv_movie_free(bsv_movie_t *handle);
+
+bool bsv_movie_ctl(enum bsv_ctl_state state, void *data);
+
+bool bsv_movie_init_handle(const char *path, enum rarch_movie_type type);
 
 #ifdef __cplusplus
 }

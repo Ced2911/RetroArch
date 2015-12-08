@@ -25,8 +25,6 @@
 #include "../../driver.h"
 #include "../../general.h"
 
-#Include "../video_viewport.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -193,7 +191,8 @@ static void *xenon360_gfx_init(const video_info_t *video, const input_driver_t *
    return gl;
 }
 
-static bool xenon360_gfx_frame(void *data, const void *frame, unsigned width, unsigned height, unsigned pitch, const char *msg)
+static bool xenon360_gfx_frame(void *data, const void *frame, unsigned width, unsigned height,
+      uint64_t frame_count, unsigned pitch, const char *msg)
 {
    gl_t *vid = data;
 
@@ -320,6 +319,7 @@ video_driver_t video_xenon360 = {
    xenon360_gfx_set_shader,
    xenon360_gfx_free,
    "xenon360",
+   NULL, /* set_viewport */
    xenon360_gfx_set_rotation,
    xenon360_gfx_viewport_info,
    xenon360_gfx_read_viewport,

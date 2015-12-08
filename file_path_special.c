@@ -20,55 +20,30 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <file/file_path.h>
 #include <stdlib.h>
 #include <boolean.h>
 #include <string.h>
 #include <time.h>
 #include <errno.h>
-#include <compat/strl.h>
-#include <compat/posix_string.h>
-#include <retro_miscellaneous.h>
 
-#ifdef __HAIKU__
-#include <kernel/image.h>
-#endif
-
-#if (defined(__CELLOS_LV2__) && !defined(__PSL1GHT__)) || defined(__QNX__) || defined(PSP)
-#include <unistd.h> /* stat() is defined here */
-#endif
-
-#if defined(__CELLOS_LV2__)
-
-#ifndef S_ISDIR
-#define S_ISDIR(x) (x & 0040000)
-#endif
-
-#endif
-
-#if defined(_WIN32)
-#ifdef _MSC_VER
-#define setmode _setmode
-#endif
-#ifdef _XBOX
-#include <xtl.h>
-#define INVALID_FILE_ATTRIBUTES -1
-#else
-#include <io.h>
-#include <fcntl.h>
+#ifdef _WIN32
 #include <direct.h>
-#include <windows.h>
-#endif
 #else
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <dirent.h>
 #include <unistd.h>
 #endif
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
 #endif
+
+#include <file/file_path.h>
+
+#include <compat/strl.h>
+#include <compat/posix_string.h>
+#include <retro_assert.h>
+#include <retro_miscellaneous.h>
+
+#include "verbosity.h"
 
 void fill_pathname_expand_special(char *out_path,
       const char *in_path, size_t size)
@@ -80,7 +55,7 @@ void fill_pathname_expand_special(char *out_path,
       if (home)
       {
          size_t src_size = strlcpy(out_path, home, size);
-         rarch_assert(src_size < size);
+         retro_assert(src_size < size);
 
          out_path  += src_size;
          size -= src_size;
@@ -88,21 +63,22 @@ void fill_pathname_expand_special(char *out_path,
       }
    }
    else if ((in_path[0] == ':') &&
-#ifdef _WIN32
-         ((in_path[1] == '/') || (in_path[1] == '\\'))
-#else
+         (
          (in_path[1] == '/')
+#ifdef _WIN32
+         || (in_path[1] == '\\')
 #endif
+         )
             )
    {
       size_t src_size;
-      char application_dir[PATH_MAX_LENGTH];
+      char application_dir[PATH_MAX_LENGTH] = {0};
 
       fill_pathname_application_path(application_dir, sizeof(application_dir));
       path_basedir(application_dir);
 
       src_size   = strlcpy(out_path, application_dir, size);
-      rarch_assert(src_size < size);
+      retro_assert(src_size < size);
 
       out_path  += src_size;
       size      -= src_size;
@@ -110,7 +86,7 @@ void fill_pathname_expand_special(char *out_path,
    }
 #endif
 
-   rarch_assert(strlcpy(out_path, in_path, size) < size);
+   retro_assert(strlcpy(out_path, in_path, size) < size);
 }
 
 
@@ -119,34 +95,43 @@ void fill_pathname_abbreviate_special(char *out_path,
 {
 #if !defined(RARCH_CONSOLE)
    unsigned i;
-   char application_dir[PATH_MAX_LENGTH];
-   const char *home = getenv("HOME");
-
-   fill_pathname_application_path(application_dir, sizeof(application_dir));
-   path_basedir(application_dir);
+   const char *candidates[3];
+   const char *notations[3];
+   char application_dir[PATH_MAX_LENGTH] = {0};
+   const char                      *home = getenv("HOME");
 
    /* application_dir could be zero-string. Safeguard against this.
     *
     * Keep application dir in front of home, moving app dir to a
     * new location inside home would break otherwise. */
 
-   const char *candidates[3] = { application_dir, home, NULL };
-   const char *notations[3] = { ":", "~", NULL };
+   /* ugly hack - use application_dir pointer before filling it in. C89 reasons */
+   candidates[0] = application_dir;
+   candidates[1] = home;
+   candidates[2] = NULL;
+
+   notations [0] = ":";
+   notations [1] = "~";
+   notations [2] = NULL;
+
+   fill_pathname_application_path(application_dir, sizeof(application_dir));
+   path_basedir(application_dir);
    
    for (i = 0; candidates[i]; i++)
    {
       if (*candidates[i] && strstr(in_path, candidates[i]) == in_path)
       {
-         size_t src_size = strlcpy(out_path, notations[i], size);
-         rarch_assert(src_size < size);
+         size_t src_size  = strlcpy(out_path, notations[i], size);
+
+         retro_assert(src_size < size);
       
-         out_path += src_size;
-         size -= src_size;
-         in_path += strlen(candidates[i]);
+         out_path        += src_size;
+         size            -= src_size;
+         in_path         += strlen(candidates[i]);
       
          if (!path_char_is_slash(*in_path))
          {
-            rarch_assert(strlcpy(out_path, path_default_slash(), size) < size);
+            retro_assert(strlcpy(out_path, path_default_slash(), size) < size);
             out_path++;
             size--;
          }
@@ -156,12 +141,15 @@ void fill_pathname_abbreviate_special(char *out_path,
    }
 #endif
 
-   rarch_assert(strlcpy(out_path, in_path, size) < size);
+   retro_assert(strlcpy(out_path, in_path, size) < size);
 }
 
 #if !defined(RARCH_CONSOLE)
 void fill_pathname_application_path(char *buf, size_t size)
 {
+#ifdef __APPLE__
+  CFBundleRef bundle = CFBundleGetMainBundle();
+#endif
    size_t i;
    (void)i;
 
@@ -172,7 +160,6 @@ void fill_pathname_application_path(char *buf, size_t size)
    DWORD ret = GetModuleFileName(GetModuleHandle(NULL), buf, size - 1);
    buf[ret] = '\0';
 #elif defined(__APPLE__)
-   CFBundleRef bundle = CFBundleGetMainBundle();
    if (bundle)
    {
       CFURLRef bundle_url = CFBundleCopyBundleURL(bundle);
@@ -181,7 +168,7 @@ void fill_pathname_application_path(char *buf, size_t size)
       CFRelease(bundle_path);
       CFRelease(bundle_url);
       
-      rarch_assert(strlcat(buf, "nobin", size) < size);
+      retro_assert(strlcat(buf, "nobin", size) < size);
       return;
    }
 #elif defined(__HAIKU__)
@@ -197,24 +184,32 @@ void fill_pathname_application_path(char *buf, size_t size)
       }
    }
 #else
-   *buf = '\0';
-   pid_t pid = getpid(); 
-   char link_path[PATH_MAX_LENGTH];
-   /* Linux, BSD and Solaris paths. Not standardized. */
-   static const char *exts[] = { "exe", "file", "path/a.out" };
-   for (i = 0; i < ARRAY_SIZE(exts); i++)
    {
-      snprintf(link_path, sizeof(link_path), "/proc/%u/%s",
-            (unsigned)pid, exts[i]);
-      ssize_t ret = readlink(link_path, buf, size - 1);
-      if (ret >= 0)
+      pid_t pid;
+      static const char *exts[] = { "exe", "file", "path/a.out" };
+      char link_path[PATH_MAX_LENGTH] = {0};
+
+      *buf      = '\0';
+      pid       = getpid(); 
+
+      /* Linux, BSD and Solaris paths. Not standardized. */
+      for (i = 0; i < ARRAY_SIZE(exts); i++)
       {
-         buf[ret] = '\0';
-         return;
+         ssize_t ret;
+
+         snprintf(link_path, sizeof(link_path), "/proc/%u/%s",
+               (unsigned)pid, exts[i]);
+         ret = readlink(link_path, buf, size - 1);
+
+         if (ret >= 0)
+         {
+            buf[ret] = '\0';
+            return;
+         }
       }
    }
    
-   /* Cannot resolve application path! This should not happen. */
+   RARCH_ERR("Cannot resolve application path! This should not happen.");
 #endif
 }
 #endif

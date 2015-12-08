@@ -1,6 +1,6 @@
 /*  RetroArch - A frontend for libretro.
  *  Copyright (C) 2011-2015 - Daniel De Matteis
- * 
+ *
  *  RetroArch is free software: you can redistribute it and/or modify it under the terms
  *  of the GNU General Public License as published by the Free Software Found-
  *  ation, either version 3 of the License, or (at your option) any later version.
@@ -13,25 +13,42 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <ctype.h>
+
+#include <compat/strl.h>
+
 #include "command_event.h"
+
+#include "frontend/frontend_driver.h"
+#include "audio/audio_driver.h"
+#include "record/record_driver.h"
+#include "autosave.h"
+#include "cheats.h"
+#include "general.h"
 #include "performance.h"
-#include "runloop_data.h"
-#include "runloop.h"
 #include "dynamic.h"
 #include "content.h"
+#include "movie.h"
 #include "screenshot.h"
-#include "intl/intl.h"
+#include "msg_hash.h"
 #include "retroarch.h"
+#include "rewind.h"
+#include "system.h"
+#include "dir_list_special.h"
 
-#include <file/file_path.h>
-#include <file/dir_list.h>
+#ifdef HAVE_CHEEVOS
+#include "cheevos.h"
+#endif
 
+#include "verbosity.h"
+#include "runloop.h"
+#include "configuration.h"
 #include "input/input_remapping.h"
 
 #ifdef HAVE_MENU
-#include "menu/menu.h"
+#include "menu/menu_driver.h"
+#include "menu/menu_display.h"
 #include "menu/menu_shader.h"
-#include "menu/menu_input.h"
 #endif
 
 #ifdef HAVE_NETPLAY
@@ -42,156 +59,30 @@
 #include <net/net_compat.h>
 #endif
 
-#ifdef HAVE_COMMAND
-static void event_init_command(void)
-{
-   driver_t *driver     = driver_get_ptr();
-   settings_t *settings = config_get_ptr();
 
-   if (!settings->stdin_cmd_enable && !settings->network_cmd_enable)
-      return;
 
-   if (settings->stdin_cmd_enable && driver->stdin_claimed)
-   {
-      RARCH_WARN("stdin command interface is desired, but input driver has already claimed stdin.\n"
-            "Cannot use this command interface.\n");
-   }
-
-   if (!(driver->command = rarch_cmd_new(settings->stdin_cmd_enable
-               && !driver->stdin_claimed,
-               settings->network_cmd_enable, settings->network_cmd_port)))
-      RARCH_ERR("Failed to initialize command interface.\n");
-}
-#endif
-
-/**
- * event_free_temporary_content:
- *
- * Frees temporary content handle.
- **/
-static void event_free_temporary_content(void)
-{
-   unsigned i;
-   global_t *global = global_get_ptr();
-
-   for (i = 0; i < global->temporary_content->size; i++)
-   {
-      const char *path = global->temporary_content->elems[i].data;
-
-      RARCH_LOG("Removing temporary content file: %s.\n", path);
-      if (remove(path) < 0)
-         RARCH_ERR("Failed to remove temporary file: %s.\n", path);
-   }
-   string_list_free(global->temporary_content);
-}
-
-#if defined(HAVE_THREADS)
-static void event_init_autosave(void)
-{
-   unsigned i;
-   settings_t *settings = config_get_ptr();
-   global_t   *global   = global_get_ptr();
-
-   if (settings->autosave_interval < 1 || !global->savefiles)
-      return;
-
-   if (!(global->autosave = (autosave_t**)calloc(global->savefiles->size,
-               sizeof(*global->autosave))))
-      return;
-
-   global->num_autosave = global->savefiles->size;
-
-   for (i = 0; i < global->savefiles->size; i++)
-   {
-      const char *path = global->savefiles->elems[i].data;
-      unsigned    type = global->savefiles->elems[i].attr.i;
-
-      if (pretro_get_memory_size(type) <= 0)
-         continue;
-
-      global->autosave[i] = autosave_new(path,
-            pretro_get_memory_data(type),
-            pretro_get_memory_size(type),
-            settings->autosave_interval);
-
-      if (!global->autosave[i])
-         RARCH_WARN(RETRO_LOG_INIT_AUTOSAVE_FAILED);
-   }
-}
-
-static void event_deinit_autosave(void)
-{
-   unsigned i;
-   global_t *global = global_get_ptr();
-
-   for (i = 0; i < global->num_autosave; i++)
-      autosave_free(global->autosave[i]);
-
-   if (global->autosave)
-      free(global->autosave);
-   global->autosave     = NULL;
-
-   global->num_autosave = 0;
-}
-#endif
 
 static void event_save_files(void)
 {
    unsigned i;
    global_t *global = global_get_ptr();
 
-   if (!global->savefiles || !global->use_sram)
+   if (!global->savefiles || !global->sram.use)
       return;
 
    for (i = 0; i < global->savefiles->size; i++)
    {
       unsigned type    = global->savefiles->elems[i].attr.i;
       const char *path = global->savefiles->elems[i].data;
-      RARCH_LOG("Saving RAM type #%u to \"%s\".\n", type, path);
+      RARCH_LOG("%s #%u %s \"%s\".\n",
+            msg_hash_to_str(MSG_SAVING_RAM_TYPE),
+            type,
+            msg_hash_to_str(MSG_TO),
+            path);
       save_ram_file(path, type);
    }
 }
 
-static void event_init_movie(void)
-{
-   settings_t *settings = config_get_ptr();
-   global_t   *global   = global_get_ptr();
-
-   if (global->bsv.movie_start_playback)
-   {
-      if (!(global->bsv.movie = bsv_movie_init(global->bsv.movie_start_path,
-                  RARCH_MOVIE_PLAYBACK)))
-      {
-         RARCH_ERR("Failed to load movie file: \"%s\".\n",
-               global->bsv.movie_start_path);
-         rarch_fail(1, "event_init_movie()");
-      }
-
-      global->bsv.movie_playback = true;
-      rarch_main_msg_queue_push("Starting movie playback.", 2, 180, false);
-      RARCH_LOG("Starting movie playback.\n");
-      settings->rewind_granularity = 1;
-   }
-   else if (global->bsv.movie_start_recording)
-   {
-      char msg[PATH_MAX_LENGTH];
-      snprintf(msg, sizeof(msg), "Starting movie record to \"%s\".",
-            global->bsv.movie_start_path);
-
-      if (!(global->bsv.movie = bsv_movie_init(global->bsv.movie_start_path,
-                  RARCH_MOVIE_RECORD)))
-      {
-         rarch_main_msg_queue_push("Failed to start movie record.", 1, 180, true);
-         RARCH_ERR("Failed to start movie record.\n");
-         return;
-      }
-
-      rarch_main_msg_queue_push(msg, 1, 180, true);
-      RARCH_LOG("Starting movie record to \"%s\".\n",
-            global->bsv.movie_start_path);
-      settings->rewind_granularity = 1;
-   }
-}
 
 /**
  * event_disk_control_set_eject:
@@ -204,25 +95,28 @@ static void event_init_movie(void)
  **/
 static void event_disk_control_set_eject(bool new_state, bool print_log)
 {
-   char msg[PATH_MAX_LENGTH];
-   global_t *global = global_get_ptr();
-   const struct retro_disk_control_callback *control = 
-      (const struct retro_disk_control_callback*)&global->system.disk_control;
-   bool error = false;
+   char msg[128]             = {0};
+   bool error                = false;
+   rarch_system_info_t *info = rarch_system_info_get_ptr();
+   const struct retro_disk_control_callback *control =
+      info ? (const struct retro_disk_control_callback*)&info->disk_control : NULL;
 
-   if (!control->get_num_images)
+   if (!control || !control->get_num_images)
       return;
 
    *msg = '\0';
 
    if (control->set_eject_state(new_state))
-      snprintf(msg, sizeof(msg), "%s virtual disk tray.",
-            new_state ? "Ejected" : "Closed");
+      snprintf(msg, sizeof(msg), "%s %s",
+            new_state ? "Ejected" : "Closed",
+            msg_hash_to_str(MSG_VIRTUAL_DISK_TRAY));
    else
    {
       error = true;
-      snprintf(msg, sizeof(msg), "Failed to %s virtual disk tray.",
-            new_state ? "eject" : "close");
+      snprintf(msg, sizeof(msg), "%s %s %s",
+            msg_hash_to_str(MSG_FAILED_TO),
+            new_state ? "eject" : "close",
+            msg_hash_to_str(MSG_VIRTUAL_DISK_TRAY));
    }
 
    if (*msg)
@@ -234,56 +128,8 @@ static void event_disk_control_set_eject(bool new_state, bool print_log)
 
       /* Only noise in menu. */
       if (print_log)
-         rarch_main_msg_queue_push(msg, 1, 180, true);
+         runloop_msg_queue_push(msg, 1, 180, true);
    }
-}
-
-/**
- * event_disk_control_append_image:
- * @path                 : Path to disk image. 
- *
- * Appends disk image to disk image list.
- **/
-void event_disk_control_append_image(const char *path)
-{
-   char msg[PATH_MAX_LENGTH];
-   unsigned new_idx;
-   struct retro_game_info info = {0};
-   global_t *global = global_get_ptr();
-   const struct retro_disk_control_callback *control = 
-      (const struct retro_disk_control_callback*)&global->system.disk_control;
-
-   event_disk_control_set_eject(true, false);
-
-   control->add_image_index();
-   new_idx = control->get_num_images();
-   if (!new_idx)
-      return;
-   new_idx--;
-
-   info.path = path;
-   control->replace_image_index(new_idx, &info);
-
-   snprintf(msg, sizeof(msg), "Appended disk: %s", path);
-   RARCH_LOG("%s\n", msg);
-   rarch_main_msg_queue_push(msg, 0, 180, true);
-
-   event_command(EVENT_CMD_AUTOSAVE_DEINIT);
-
-   /* TODO: Need to figure out what to do with subsystems case. */
-   if (!*global->subsystem)
-   {
-      /* Update paths for our new image.
-       * If we actually use append_image, we assume that we
-       * started out in a single disk case, and that this way
-       * of doing it makes the most sense. */
-      rarch_set_paths(path);
-      rarch_fill_pathnames();
-   }
-
-   event_command(EVENT_CMD_AUTOSAVE_INIT);
-
-   event_disk_control_set_eject(false, false);
 }
 
 /**
@@ -307,14 +153,14 @@ static void event_check_disk_eject(
  **/
 static void event_disk_control_set_index(unsigned idx)
 {
-   char msg[PATH_MAX_LENGTH];
    unsigned num_disks;
-   global_t *global = global_get_ptr();
-   const struct retro_disk_control_callback *control = 
-      (const struct retro_disk_control_callback*)&global->system.disk_control;
-   bool error = false;
+   bool error                                        = false;
+   char msg[128]                                     = {0};
+   rarch_system_info_t                      *info    = rarch_system_info_get_ptr();
+   const struct retro_disk_control_callback *control =
+      info ? (const struct retro_disk_control_callback*)&info->disk_control : NULL;
 
-   if (!control->get_num_images)
+   if (!control || !control->get_num_images)
       return;
 
    *msg = '\0';
@@ -327,7 +173,9 @@ static void event_disk_control_set_index(unsigned idx)
          snprintf(msg, sizeof(msg), "Setting disk %u of %u in tray.",
                idx + 1, num_disks);
       else
-         strlcpy(msg, "Removed disk from tray.", sizeof(msg));
+         strlcpy(msg,
+               msg_hash_to_str(MSG_REMOVED_DISK_FROM_TRAY),
+               sizeof(msg));
    }
    else
    {
@@ -335,7 +183,9 @@ static void event_disk_control_set_index(unsigned idx)
          snprintf(msg, sizeof(msg), "Failed to set disk %u of %u.",
                idx + 1, num_disks);
       else
-         strlcpy(msg, "Failed to remove disk from tray.", sizeof(msg));
+         strlcpy(msg,
+               msg_hash_to_str(MSG_FAILED_TO_REMOVE_DISK_FROM_TRAY),
+               sizeof(msg));
       error = true;
    }
 
@@ -345,8 +195,62 @@ static void event_disk_control_set_index(unsigned idx)
          RARCH_ERR("%s\n", msg);
       else
          RARCH_LOG("%s\n", msg);
-      rarch_main_msg_queue_push(msg, 1, 180, true);
+      runloop_msg_queue_push(msg, 1, 180, true);
    }
+}
+
+/**
+ * event_disk_control_append_image:
+ * @path                 : Path to disk image.
+ *
+ * Appends disk image to disk image list.
+ **/
+void event_disk_control_append_image(const char *path)
+{
+   unsigned new_idx;
+   char msg[128]                                     = {0};
+   struct retro_game_info info                       = {0};
+   global_t                                  *global = global_get_ptr();
+   rarch_system_info_t                       *sysinfo = rarch_system_info_get_ptr();
+   const struct retro_disk_control_callback *control =
+      sysinfo ? (const struct retro_disk_control_callback*)&sysinfo->disk_control
+      : NULL;
+
+   if (!control)
+      return;
+
+   event_disk_control_set_eject(true, false);
+
+   control->add_image_index();
+   new_idx = control->get_num_images();
+   if (!new_idx)
+      return;
+   new_idx--;
+
+   info.path = path;
+   control->replace_image_index(new_idx, &info);
+
+   snprintf(msg, sizeof(msg), "%s: ", msg_hash_to_str(MSG_APPENDED_DISK));
+   strlcat(msg, path, sizeof(msg));
+   RARCH_LOG("%s\n", msg);
+   runloop_msg_queue_push(msg, 0, 180, true);
+
+   event_command(EVENT_CMD_AUTOSAVE_DEINIT);
+
+   /* TODO: Need to figure out what to do with subsystems case. */
+   if (!*global->subsystem)
+   {
+      /* Update paths for our new image.
+       * If we actually use append_image, we assume that we
+       * started out in a single disk case, and that this way
+       * of doing it makes the most sense. */
+      rarch_set_paths(path);
+      rarch_ctl(RARCH_CTL_FILL_PATHNAMES, NULL);
+   }
+
+   event_command(EVENT_CMD_AUTOSAVE_INIT);
+   event_disk_control_set_index(new_idx);
+   event_disk_control_set_eject(false, false);
 }
 
 /**
@@ -358,13 +262,24 @@ static void event_disk_control_set_index(unsigned idx)
 static void event_check_disk_prev(
       const struct retro_disk_control_callback *control)
 {
-   unsigned num_disks    = control->get_num_images();
-   unsigned current      = control->get_image_index();
-   bool disk_prev_enable = num_disks && num_disks != UINT_MAX;
+   unsigned num_disks    = 0;
+   unsigned current      = 0;
+   bool disk_prev_enable = false;
+
+   if (!control)
+      return;
+   if (!control->get_num_images)
+      return;
+   if (!control->get_image_index)
+      return;
+
+   num_disks        = control->get_num_images();
+   current          = control->get_image_index();
+   disk_prev_enable = num_disks && num_disks != UINT_MAX;
 
    if (!disk_prev_enable)
    {
-      RARCH_ERR("Got invalid disk index from libretro.\n");
+      RARCH_ERR("%s.\n", msg_hash_to_str(MSG_GOT_INVALID_DISK_INDEX));
       return;
    }
 
@@ -382,13 +297,24 @@ static void event_check_disk_prev(
 static void event_check_disk_next(
       const struct retro_disk_control_callback *control)
 {
-   unsigned num_disks        = control->get_num_images();
-   unsigned current          = control->get_image_index();
-   bool     disk_next_enable = num_disks && num_disks != UINT_MAX;
+   unsigned num_disks        = 0;
+   unsigned current          = 0;
+   bool     disk_next_enable = false;
+
+   if (!control)
+      return;
+   if (!control->get_num_images)
+      return;
+   if (!control->get_image_index)
+      return;
+
+   num_disks        = control->get_num_images();
+   current          = control->get_image_index();
+   disk_next_enable = num_disks && num_disks != UINT_MAX;
 
    if (!disk_next_enable)
    {
-      RARCH_ERR("Got invalid disk index from libretro.\n");
+      RARCH_ERR("%s.\n", msg_hash_to_str(MSG_GOT_INVALID_DISK_INDEX));
       return;
    }
 
@@ -406,19 +332,18 @@ static void event_check_disk_next(
  **/
 static void event_set_volume(float gain)
 {
-   char msg[PATH_MAX_LENGTH];
-   settings_t *settings    = config_get_ptr();
-   global_t   *global      = global_get_ptr();
+   char msg[128]             = {0};
+   settings_t *settings      = config_get_ptr();
 
    settings->audio.volume += gain;
    settings->audio.volume  = max(settings->audio.volume, -80.0f);
    settings->audio.volume  = min(settings->audio.volume, 12.0f);
 
    snprintf(msg, sizeof(msg), "Volume: %.1f dB", settings->audio.volume);
-   rarch_main_msg_queue_push(msg, 1, 180, true);
+   runloop_msg_queue_push(msg, 1, 180, true);
    RARCH_LOG("%s\n", msg);
 
-   global->audio_data.volume_gain = db_to_gain(settings->audio.volume);
+   audio_driver_set_volume_gain(db_to_gain(settings->audio.volume));
 }
 
 /**
@@ -430,7 +355,7 @@ static void event_init_controllers(void)
 {
    unsigned i;
    settings_t *settings = config_get_ptr();
-   global_t   *global   = global_get_ptr();
+   rarch_system_info_t *info = rarch_system_info_get_ptr();
 
    for (i = 0; i < MAX_USERS; i++)
    {
@@ -438,9 +363,9 @@ static void event_init_controllers(void)
       const struct retro_controller_description *desc = NULL;
       unsigned device = settings->input.libretro_device[i];
 
-      if (i < global->system.num_ports)
+      if (i < info->num_ports)
          desc = libretro_find_controller_description(
-               &global->system.ports[i], device);
+               &info->ports[i], device);
 
       if (desc)
          ident = desc->desc;
@@ -449,7 +374,7 @@ static void event_init_controllers(void)
       {
          /* If we're trying to connect a completely unknown device,
           * revert back to JOYPAD. */
-         
+
          if (device != RETRO_DEVICE_JOYPAD && device != RETRO_DEVICE_NONE)
          {
             /* Do not fix settings->input.libretro_device[i],
@@ -465,7 +390,7 @@ static void event_init_controllers(void)
       {
          case RETRO_DEVICE_NONE:
             RARCH_LOG("Disconnecting device from port %u.\n", i + 1);
-            pretro_set_controller_port_device(i, device);
+            core.retro_set_controller_port_device(i, device);
             break;
          case RETRO_DEVICE_JOYPAD:
             break;
@@ -475,7 +400,7 @@ static void event_init_controllers(void)
              * cores needlessly. */
             RARCH_LOG("Connecting %s (ID: %u) to port %u.\n", ident,
                   device, i + 1);
-            pretro_set_controller_port_device(i, device);
+            core.retro_set_controller_port_device(i, device);
             break;
       }
    }
@@ -483,35 +408,36 @@ static void event_init_controllers(void)
 
 static void event_deinit_core(bool reinit)
 {
-   global_t *global = global_get_ptr();
-   
-   pretro_unload_game();
-   pretro_deinit();
+   global_t *global     = global_get_ptr();
+
+#ifdef HAVE_CHEEVOS
+   /* Unload the achievements from memory. */
+   cheevos_unload();
+#endif
+
+   core.retro_unload_game();
+   core.retro_deinit();
 
    if (reinit)
       event_command(EVENT_CMD_DRIVERS_DEINIT);
-    
+
+  /* auto overrides: reload the original config */
    if(global->overrides_active)
    {
       config_unload_override();
       global->overrides_active = false;
    }
-   pretro_set_environment(rarch_environment_cb);
+
    uninit_libretro_sym();
 }
 
 static void event_init_cheats(void)
 {
    bool allow_cheats = true;
-   driver_t *driver  = driver_get_ptr();
-   global_t *global  = global_get_ptr();
-
-   (void)driver;
-
 #ifdef HAVE_NETPLAY
-   allow_cheats &= !driver->netplay_data;
+   allow_cheats &= !netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_DATA_INITED, NULL);
 #endif
-   allow_cheats &= !global->bsv.movie;
+   allow_cheats &= !bsv_movie_ctl(BSV_MOVIE_CTL_IS_INITED, NULL);
 
    if (!allow_cheats)
       return;
@@ -524,33 +450,35 @@ static bool event_load_save_files(void)
    unsigned i;
    global_t *global = global_get_ptr();
 
-   if (!global->savefiles || global->sram_load_disable)
+   if (!global)
+      return false;
+   if (!global->savefiles || global->sram.load_disable)
       return false;
 
    for (i = 0; i < global->savefiles->size; i++)
       load_ram_file(global->savefiles->elems[i].data,
             global->savefiles->elems[i].attr.i);
-    
+
    return true;
 }
 
 static void event_load_auto_state(void)
 {
    bool ret;
-   char msg[PATH_MAX_LENGTH];
-   char savestate_name_auto[PATH_MAX_LENGTH];
+   char msg[128]                             = {0};
+   char savestate_name_auto[PATH_MAX_LENGTH] = {0};
    settings_t *settings = config_get_ptr();
    global_t   *global   = global_get_ptr();
 
 #ifdef HAVE_NETPLAY
-   if (global->netplay_enable && !global->netplay_is_spectate)
+   if (global->netplay.enable && !global->netplay.is_spectate)
       return;
 #endif
 
    if (!settings->savestate_auto_load)
       return;
 
-   fill_pathname_noext(savestate_name_auto, global->savestate_name,
+   fill_pathname_noext(savestate_name_auto, global->name.savestate,
          ".auto", sizeof(savestate_name_auto));
 
    if (!path_file_exists(savestate_name_auto))
@@ -562,18 +490,19 @@ static void event_load_auto_state(void)
 
    snprintf(msg, sizeof(msg), "Auto-loading savestate from \"%s\" %s.",
          savestate_name_auto, ret ? "succeeded" : "failed");
-   rarch_main_msg_queue_push(msg, 1, 180, false);
+   runloop_msg_queue_push(msg, 1, 180, false);
    RARCH_LOG("%s\n", msg);
 }
 
 static void event_set_savestate_auto_index(void)
 {
-   char state_dir[PATH_MAX_LENGTH], state_base[PATH_MAX_LENGTH];
    size_t i;
-   struct string_list *dir_list = NULL;
-   unsigned max_idx             = 0;
-   settings_t *settings         = config_get_ptr();
-   global_t   *global           = global_get_ptr();
+   char state_dir[PATH_MAX_LENGTH]  = {0};
+   char state_base[PATH_MAX_LENGTH] = {0};
+   struct string_list *dir_list     = NULL;
+   unsigned max_idx                 = 0;
+   settings_t *settings             = config_get_ptr();
+   global_t   *global               = global_get_ptr();
 
    if (!settings->savestate_auto_index)
       return;
@@ -585,20 +514,20 @@ static void event_set_savestate_auto_index(void)
     * /foo/path/content.state%d, where %d is the largest number available.
     */
 
-   fill_pathname_basedir(state_dir, global->savestate_name,
+   fill_pathname_basedir(state_dir, global->name.savestate,
          sizeof(state_dir));
-   fill_pathname_base(state_base, global->savestate_name,
+   fill_pathname_base(state_base, global->name.savestate,
          sizeof(state_base));
 
-   if (!(dir_list = dir_list_new(state_dir, NULL, false)))
+   if (!(dir_list = dir_list_new_special(state_dir, DIR_LIST_PLAIN, NULL)))
       return;
 
    for (i = 0; i < dir_list->size; i++)
    {
       unsigned idx;
-      char elem_base[PATH_MAX_LENGTH];
-      const char *end      = NULL;
-      const char *dir_elem = dir_list->elems[i].data;
+      char elem_base[128]             = {0};
+      const char *end                 = NULL;
+      const char *dir_elem            = dir_list->elems[i].data;
 
       fill_pathname_base(elem_base, dir_elem, sizeof(elem_base));
 
@@ -606,7 +535,7 @@ static void event_set_savestate_auto_index(void)
          continue;
 
       end = dir_elem + strlen(dir_elem);
-      while ((end > dir_elem) && isdigit(end[-1]))
+      while ((end > dir_elem) && isdigit((int)end[-1]))
          end--;
 
       idx = strtoul(end, NULL, 0);
@@ -626,22 +555,23 @@ static bool event_init_content(void)
 
    /* No content to be loaded for dummy core,
     * just successfully exit. */
-   if (global->libretro_dummy) 
+   if (global->inited.core.type == CORE_TYPE_DUMMY)
       return true;
 
-   if (!global->libretro_no_content)
-      rarch_fill_pathnames();
+   if (!global->inited.core.no_content)
+      rarch_ctl(RARCH_CTL_FILL_PATHNAMES, NULL);
 
    if (!init_content_file())
       return false;
 
-   if (global->libretro_no_content)
+   if (global->inited.core.no_content)
       return true;
 
    event_set_savestate_auto_index();
 
    if (event_load_save_files())
-      RARCH_LOG("Skipping SRAM load.\n");
+      RARCH_LOG("%s.\n",
+            msg_hash_to_str(MSG_SKIPPING_SRAM_LOAD));
 
    event_load_auto_state();
    event_command(EVENT_CMD_BSV_MOVIE_INIT);
@@ -653,32 +583,40 @@ static bool event_init_content(void)
 static bool event_init_core(void)
 {
    global_t *global     = global_get_ptr();
-   driver_t *driver     = driver_get_ptr();
    settings_t *settings = config_get_ptr();
 
+   /* auto overrides: apply overrides */
    if(settings->auto_overrides_enable)
    {
       if (config_load_override())
          global->overrides_active = true;
       else
-         global->overrides_active = false; 
+         global->overrides_active = false;
    }
 
-   pretro_set_environment(rarch_environment_cb);  
-  
+   /* reset video format to libretro's default */
+   video_driver_set_pixel_format(RETRO_PIXEL_FORMAT_0RGB1555);
+
+   core.retro_set_environment(rarch_environment_cb);
+
+   /* auto-remap: apply remap files */
    if(settings->auto_remaps_enable)
       config_load_remap();
 
-   rarch_verify_api_version();
-   pretro_init();
+   /* per-core saves: reset redirection paths */
+   if((settings->sort_savestates_enable || settings->sort_savefiles_enable) && !global->inited.core.no_content)
+      rarch_ctl(RARCH_CTL_SET_PATHS_REDIRECT, NULL);
 
-   global->use_sram = !global->libretro_dummy &&
-      !global->libretro_no_content;
+   rarch_ctl(RARCH_CTL_VERIFY_API_VERSION, NULL);
+   core.retro_init();
+
+   global->sram.use = (global->inited.core.type == CORE_TYPE_PLAIN) &&
+      !global->inited.core.no_content;
 
    if (!event_init_content())
       return false;
 
-   retro_init_libretro_cbs(&driver->retro_ctx);
+   retro_init_libretro_cbs(&retro_ctx);
    rarch_init_system_av_info();
 
    return true;
@@ -687,32 +625,35 @@ static bool event_init_core(void)
 static bool event_save_auto_state(void)
 {
    bool ret;
-   char savestate_name_auto[PATH_MAX_LENGTH];
+   char savestate_name_auto[PATH_MAX_LENGTH] = {0};
    settings_t *settings = config_get_ptr();
    global_t   *global   = global_get_ptr();
 
-   if (!settings->savestate_auto_save || global->libretro_dummy ||
-       global->libretro_no_content)
+   if (!settings->savestate_auto_save ||
+         (global->inited.core.type == CORE_TYPE_DUMMY) ||
+       global->inited.core.no_content)
        return false;
 
-   fill_pathname_noext(savestate_name_auto, global->savestate_name,
+   fill_pathname_noext(savestate_name_auto, global->name.savestate,
          ".auto", sizeof(savestate_name_auto));
 
    ret = save_state(savestate_name_auto);
    RARCH_LOG("Auto save state to \"%s\" %s.\n", savestate_name_auto, ret ?
          "succeeded" : "failed");
-    
+
    return true;
 }
 
 static void event_init_remapping(void)
 {
    settings_t *settings = config_get_ptr();
+   const char   *path   = settings->input.remapping_path;
+   config_file_t *conf  = config_file_new(path);
 
-   if (!settings->input.remap_binds_enable)
+   if (!settings->input.remap_binds_enable || !conf)
       return;
 
-   input_remapping_load_file(settings->input.remapping_path);
+   input_remapping_load_file(conf, path);
 }
 
 /**
@@ -725,27 +666,28 @@ static void event_init_remapping(void)
  **/
 static bool event_save_core_config(void)
 {
-   char config_dir[PATH_MAX_LENGTH], config_name[PATH_MAX_LENGTH],
-        config_path[PATH_MAX_LENGTH], msg[PATH_MAX_LENGTH];
-   bool ret             = false;
-   bool found_path      = false;
-   bool overrides_active = false;
-   settings_t *settings = config_get_ptr();
-   global_t   *global   = global_get_ptr();
+   char config_dir[PATH_MAX_LENGTH]  = {0};
+   char config_name[PATH_MAX_LENGTH] = {0};
+   char config_path[PATH_MAX_LENGTH] = {0};
+   char msg[128]                     = {0};
+   bool ret                          = false;
+   bool found_path                   = false;
+   bool overrides_active             = false;
+   settings_t *settings              = config_get_ptr();
+   global_t   *global                = global_get_ptr();
 
    *config_dir = '\0';
 
    if (*settings->menu_config_directory)
       strlcpy(config_dir, settings->menu_config_directory,
             sizeof(config_dir));
-   else if (*global->config_path) /* Fallback */
-      fill_pathname_basedir(config_dir, global->config_path,
+   else if (*global->path.config) /* Fallback */
+      fill_pathname_basedir(config_dir, global->path.config,
             sizeof(config_dir));
    else
    {
-      const char *message = "Config directory not set. Cannot save new config.";
-      rarch_main_msg_queue_push(message, 1, 180, true);
-      RARCH_ERR("%s\n", message);
+      runloop_msg_queue_push_new(MSG_CONFIG_DIRECTORY_NOT_SET, 1, 180, true);
+      RARCH_ERR("%s\n", msg_hash_to_str(MSG_CONFIG_DIRECTORY_NOT_SET));
       return false;
    }
 
@@ -757,7 +699,7 @@ static bool event_save_core_config(void)
       /* In case of collision, find an alternative name. */
       for (i = 0; i < 16; i++)
       {
-         char tmp[64];
+         char tmp[64] = {0};
 
          fill_pathname_base(config_name, settings->libretro,
                sizeof(config_name));
@@ -800,8 +742,8 @@ static bool event_save_core_config(void)
 
    if ((ret = config_save_file(config_path)))
    {
-      strlcpy(global->config_path, config_path,
-            sizeof(global->config_path));
+      strlcpy(global->path.config, config_path,
+            sizeof(global->path.config));
       snprintf(msg, sizeof(msg), "Saved new config to \"%s\".",
             config_path);
       RARCH_LOG("%s\n", msg);
@@ -813,97 +755,130 @@ static bool event_save_core_config(void)
       RARCH_ERR("%s\n", msg);
    }
 
-   rarch_main_msg_queue_push(msg, 1, 180, true);
+   runloop_msg_queue_push(msg, 1, 180, true);
    global->overrides_active = overrides_active;
    return ret;
 }
 
 /**
+ * event_save_current_config:
+ *
+ * Saves current configuration file to disk, and (optionally)
+ * autosave state.
+ **/
+void event_save_current_config(void)
+{
+   settings_t *settings = config_get_ptr();
+   global_t   *global   = global_get_ptr();
+
+   if (settings->config_save_on_exit && *global->path.config)
+   {
+      /* Save last core-specific config to the default config location,
+       * needed on consoles for core switching and reusing last good
+       * config for new cores.
+       */
+      config_save_file(global->path.config);
+
+      /* Flush out the core specific config. */
+      if (*global->path.core_specific_config &&
+            settings->core_specific_config)
+         config_save_file(global->path.core_specific_config);
+   }
+
+   event_command(EVENT_CMD_AUTOSAVE_STATE);
+}
+
+/**
  * event_save_state
  * @path            : Path to state.
- * @msg             : Message.
- * @sizeof_msg      : Size of @msg.
+ * @s               : Message.
+ * @len             : Size of @s.
  *
  * Saves a state with path being @path.
  **/
 static void event_save_state(const char *path,
-      char *msg, size_t sizeof_msg)
+      char *s, size_t len)
 {
    settings_t *settings = config_get_ptr();
 
    if (!save_state(path))
    {
-      snprintf(msg, sizeof_msg,
-            "Failed to save state to \"%s\".", path);
+      snprintf(s, len, "%s \"%s\".",
+            msg_hash_to_str(MSG_FAILED_TO_SAVE_STATE_TO),
+            path);
       return;
    }
 
    if (settings->state_slot < 0)
-      snprintf(msg, sizeof_msg,
-            "Saved state to slot #-1 (auto).");
+      snprintf(s, len, "%s #-1 (auto).", msg_hash_to_str(MSG_SAVED_STATE_TO_SLOT));
    else
-      snprintf(msg, sizeof_msg,
-            "Saved state to slot #%d.", settings->state_slot);
+      snprintf(s, len, "%s #%d.", msg_hash_to_str(MSG_SAVED_STATE_TO_SLOT),
+            settings->state_slot);
 }
 
 /**
  * event_load_state
  * @path            : Path to state.
- * @msg             : Message.
- * @sizeof_msg      : Size of @msg.
+ * @s               : Message.
+ * @len             : Size of @s.
  *
  * Loads a state with path being @path.
  **/
-static void event_load_state(const char *path,
-      char *msg, size_t sizeof_msg)
+static void event_load_state(const char *path, char *s, size_t len)
 {
    settings_t *settings = config_get_ptr();
 
    if (!load_state(path))
    {
-      snprintf(msg, sizeof_msg,
-            "Failed to load state from \"%s\".", path);
+      snprintf(s, len, "%s \"%s\".",
+            msg_hash_to_str(MSG_FAILED_TO_LOAD_STATE),
+            path);
       return;
-
    }
 
    if (settings->state_slot < 0)
-      snprintf(msg, sizeof_msg,
-            "Loaded state from slot #-1 (auto).");
+      snprintf(s, len, "%s #-1 (auto).", msg_hash_to_str(MSG_LOADED_STATE_FROM_SLOT));
    else
-      snprintf(msg, sizeof_msg,
-            "Loaded state from slot #%d.", settings->state_slot);
+      snprintf(s, len, "%s #%d.", msg_hash_to_str(MSG_LOADED_STATE_FROM_SLOT),
+            settings->state_slot);
 }
 
 static void event_main_state(unsigned cmd)
 {
-   char path[PATH_MAX_LENGTH], msg[PATH_MAX_LENGTH];
-   global_t *global     = global_get_ptr();
-   settings_t *settings = config_get_ptr();
+   char path[PATH_MAX_LENGTH] = {0};
+   char msg[128]              = {0};
+   global_t *global           = global_get_ptr();
+   settings_t *settings       = config_get_ptr();
 
    if (settings->state_slot > 0)
       snprintf(path, sizeof(path), "%s%d",
-            global->savestate_name, settings->state_slot);
+            global->name.savestate, settings->state_slot);
    else if (settings->state_slot < 0)
-      snprintf(path, sizeof(path), "%s.auto",
-            global->savestate_name);
+      fill_pathname_join_delim(path,
+            global->name.savestate, "auto", '.', sizeof(path));
    else
-      strlcpy(path, global->savestate_name, sizeof(path));
+      strlcpy(path, global->name.savestate, sizeof(path));
 
-   if (pretro_serialize_size())
+   if (core.retro_serialize_size())
    {
-      if (cmd == EVENT_CMD_SAVE_STATE)
-         event_save_state(path, msg, sizeof(msg));
-      else if (cmd == EVENT_CMD_LOAD_STATE)
-         event_load_state(path, msg, sizeof(msg));
+      switch (cmd)
+      {
+         case EVENT_CMD_SAVE_STATE:
+            event_save_state(path, msg, sizeof(msg));
+            break;
+         case EVENT_CMD_LOAD_STATE:
+            event_load_state(path, msg, sizeof(msg));
+            break;
+      }
    }
    else
-      strlcpy(msg, "Core does not support save states.", sizeof(msg));
+      strlcpy(msg, msg_hash_to_str(MSG_CORE_DOES_NOT_SUPPORT_SAVESTATES), sizeof(msg));
 
-   rarch_main_msg_queue_push(msg, 2, 180, true);
+   runloop_msg_queue_push(msg, 2, 180, true);
    RARCH_LOG("%s\n", msg);
 }
 
+#ifdef HAVE_MENU
 static bool event_update_system_info(struct retro_system_info *_info,
       bool *load_no_content)
 {
@@ -917,21 +892,22 @@ static bool event_update_system_info(struct retro_system_info *_info,
    libretro_get_system_info(settings->libretro, _info,
          load_no_content);
 #endif
-   if (!global->core_info)
+   if (!global->core_info.list)
       return false;
 
-   if (!core_info_list_get_info(global->core_info,
-            global->core_info_current, settings->libretro))
+   if (!core_info_list_get_info(global->core_info.list,
+            global->core_info.current, settings->libretro))
       return false;
 
    return true;
 }
+#endif
 
 /**
  * event_command:
  * @cmd                  : Event command index.
  *
- * Performs RetroArch event command with index @cmd.
+ * Performs program event command with index @cmd.
  *
  * Returns: true (1) on success, otherwise false (0).
  **/
@@ -939,45 +915,75 @@ bool event_command(enum event_command cmd)
 {
    unsigned i           = 0;
    bool boolean         = false;
-   runloop_t *runloop   = rarch_main_get_ptr();
-   driver_t  *driver    = driver_get_ptr();
    global_t  *global    = global_get_ptr();
    settings_t *settings = config_get_ptr();
+   rarch_system_info_t *info = rarch_system_info_get_ptr();
 
    (void)i;
 
    switch (cmd)
    {
+      case EVENT_CMD_SET_PER_GAME_RESOLUTION:
+#if defined(GEKKO)
+         {
+            unsigned width = 0, height = 0;
+
+            event_command(EVENT_CMD_VIDEO_SET_ASPECT_RATIO);
+
+            if (video_driver_get_video_output_size(&width, &height))
+            {
+               char msg[128] = {0};
+
+               video_driver_set_video_mode(width, height, true);
+
+               snprintf(msg, sizeof(msg),"Resolution: %dx%d",width, height);
+               runloop_msg_queue_push(msg, 1, 100, true);
+            }
+         }
+#endif
+         break;
       case EVENT_CMD_LOAD_CONTENT_PERSIST:
 #ifdef HAVE_DYNAMIC
          event_command(EVENT_CMD_LOAD_CORE);
 #endif
-         rarch_main_set_state(RARCH_ACTION_STATE_LOAD_CONTENT);
+         rarch_ctl(RARCH_CTL_LOAD_CONTENT, NULL);
+         break;
+#ifdef HAVE_FFMPEG
+      case EVENT_CMD_LOAD_CONTENT_FFMPEG:
+         rarch_ctl(RARCH_CTL_LOAD_CONTENT_FFMPEG, NULL);
+         break;
+#endif
+      case EVENT_CMD_LOAD_CONTENT_IMAGEVIEWER:
+         rarch_ctl(RARCH_CTL_LOAD_CONTENT_IMAGEVIEWER, NULL);
          break;
       case EVENT_CMD_LOAD_CONTENT:
+         {
 #ifdef HAVE_DYNAMIC
-         event_command(EVENT_CMD_LOAD_CONTENT_PERSIST);
+            event_command(EVENT_CMD_LOAD_CONTENT_PERSIST);
 #else
-         rarch_environment_cb(RETRO_ENVIRONMENT_SET_LIBRETRO_PATH,
-               (void*)settings->libretro);
-         rarch_environment_cb(RETRO_ENVIRONMENT_EXEC,
-               (void*)global->fullpath);
-         event_command(EVENT_CMD_QUIT);
+            char *fullpath = NULL;
+            runloop_ctl(RUNLOOP_CTL_GET_CONTENT_PATH, &fullpath);
+            rarch_environment_cb(RETRO_ENVIRONMENT_SET_LIBRETRO_PATH,
+                  (void*)settings->libretro);
+            rarch_environment_cb(RETRO_ENVIRONMENT_EXEC, (void*)fullpath);
+            event_command(EVENT_CMD_QUIT);
 #endif
+         }
          break;
       case EVENT_CMD_LOAD_CORE_DEINIT:
 #ifdef HAVE_DYNAMIC
-         libretro_free_system_info(&global->menu.info);
+#ifdef HAVE_MENU
+         libretro_free_system_info(&g_system_menu);
+#endif
 #endif
          break;
       case EVENT_CMD_LOAD_CORE_PERSIST:
          event_command(EVENT_CMD_LOAD_CORE_DEINIT);
          {
 #ifdef HAVE_MENU
-            menu_handle_t *menu = menu_driver_get_ptr();
-            if (menu)
-               event_update_system_info(&global->menu.info,
-                     &menu->load_no_content);
+            bool *ptr = NULL;
+            if (menu_driver_ctl(RARCH_MENU_CTL_LOAD_NO_CONTENT_GET, &ptr))
+               event_update_system_info(&g_system_menu, ptr);
 #endif
          }
          break;
@@ -988,41 +994,54 @@ bool event_command(enum event_command cmd)
 #endif
          break;
       case EVENT_CMD_LOAD_STATE:
-         /* Immutable - disallow savestate load when 
+         /* Immutable - disallow savestate load when
           * we absolutely cannot change game state. */
-         if (global->bsv.movie)
+         if (bsv_movie_ctl(BSV_MOVIE_CTL_IS_INITED, NULL))
             return false;
 
 #ifdef HAVE_NETPLAY
-         if (driver->netplay_data)
+         if (netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_DATA_INITED, NULL))
             return false;
 #endif
          event_main_state(cmd);
          break;
       case EVENT_CMD_RESIZE_WINDOWED_SCALE:
-         if (global->pending.windowed_scale == 0)
-            return false;
+         {
+            unsigned idx = 0;
+            unsigned *window_scale = NULL;
 
-         settings->video.scale = global->pending.windowed_scale;
+            runloop_ctl(RUNLOOP_CTL_GET_WINDOWED_SCALE, &window_scale);
 
-         if (!settings->video.fullscreen)
-            event_command(EVENT_CMD_REINIT);
+            if (*window_scale == 0)
+               return false;
 
-         global->pending.windowed_scale = 0;
+            settings->video.scale = *window_scale;
+
+            if (!settings->video.fullscreen)
+               event_command(EVENT_CMD_REINIT);
+
+            runloop_ctl(RUNLOOP_CTL_SET_WINDOWED_SCALE, &idx);
+         }
          break;
       case EVENT_CMD_MENU_TOGGLE:
-         if (runloop->is_menu)
-            rarch_main_set_state(RARCH_ACTION_STATE_MENU_RUNNING_FINISHED);
+#ifdef HAVE_MENU
+         if (menu_driver_ctl(RARCH_MENU_CTL_IS_ALIVE, NULL))
+            rarch_ctl(RARCH_CTL_MENU_RUNNING_FINISHED, NULL);
          else
-            rarch_main_set_state(RARCH_ACTION_STATE_MENU_RUNNING);
+            rarch_ctl(RARCH_CTL_MENU_RUNNING, NULL);
+#endif
          break;
       case EVENT_CMD_CONTROLLERS_INIT:
          event_init_controllers();
          break;
       case EVENT_CMD_RESET:
-         RARCH_LOG(RETRO_LOG_RESETTING_CONTENT);
-         rarch_main_msg_queue_push("Reset.", 1, 120, true);
-         pretro_reset();
+         RARCH_LOG("%s.\n", msg_hash_to_str(MSG_RESET));
+         runloop_msg_queue_push_new(MSG_RESET, 1, 120, true);
+
+#ifdef HAVE_CHEEVOS
+         cheevos_set_cheats();
+#endif
+         core.retro_reset();
 
          /* bSNES since v073r01 resets controllers to JOYPAD
           * after a reset, so just enforce it here. */
@@ -1034,61 +1053,59 @@ bool event_command(enum event_command cmd)
 
          event_main_state(cmd);
          break;
+      case EVENT_CMD_SAVE_STATE_DECREMENT:
+         /* Slot -1 is (auto) slot. */
+         if (settings->state_slot >= 0)
+            settings->state_slot--;
+         break;
+      case EVENT_CMD_SAVE_STATE_INCREMENT:
+         settings->state_slot++;
+         break;
       case EVENT_CMD_TAKE_SCREENSHOT:
          if (!take_screenshot())
             return false;
          break;
-      case EVENT_CMD_PREPARE_DUMMY:
-         {
-#ifdef HAVE_MENU
-            menu_handle_t *menu = menu_driver_get_ptr();
-            if (menu)
-               menu->load_no_content = false;
-#endif
-            rarch_main_data_deinit();
-
-            *global->fullpath = '\0';
-
-            rarch_main_set_state(RARCH_ACTION_STATE_LOAD_CONTENT);
-            global->system.shutdown = false;
-         }
-         break;
       case EVENT_CMD_UNLOAD_CORE:
-         event_command(EVENT_CMD_PREPARE_DUMMY);
-#ifdef HAVE_DYNAMIC
-         libretro_free_system_info(&global->menu.info);
-#endif
+         runloop_ctl(RUNLOOP_CTL_PREPARE_DUMMY, NULL);
+         event_command(EVENT_CMD_LOAD_CORE_DEINIT);
          break;
       case EVENT_CMD_QUIT:
-         rarch_main_set_state(RARCH_ACTION_STATE_QUIT);
+         rarch_ctl(RARCH_CTL_QUIT, NULL);
          break;
       case EVENT_CMD_REINIT:
-         driver->video_cache_context = 
-            global->system.hw_render_callback.cache_context;
-         driver->video_cache_context_ack = false;
-         event_command(EVENT_CMD_RESET_CONTEXT);
-         driver->video_cache_context = false;
+         {
+            const struct retro_hw_render_callback *hw_render =
+               (const struct retro_hw_render_callback*)video_driver_callback();
 
-         /* Poll input to avoid possibly stale data to corrupt things. */
-         input_driver_poll();
+            if (hw_render->cache_context)
+               video_driver_ctl(RARCH_DISPLAY_CTL_SET_VIDEO_CACHE_CONTEXT, NULL);
+            else
+               video_driver_ctl(RARCH_DISPLAY_CTL_UNSET_VIDEO_CACHE_CONTEXT, NULL);
+
+            video_driver_ctl(RARCH_DISPLAY_CTL_UNSET_VIDEO_CACHE_CONTEXT_ACK, NULL);
+            event_command(EVENT_CMD_RESET_CONTEXT);
+            video_driver_ctl(RARCH_DISPLAY_CTL_UNSET_VIDEO_CACHE_CONTEXT, NULL);
+
+            /* Poll input to avoid possibly stale data to corrupt things. */
+            input_driver_ctl(RARCH_INPUT_CTL_POLL, NULL);
 
 #ifdef HAVE_MENU
-         runloop->frames.video.current.menu.framebuf.dirty = true;
-         if (runloop->is_menu)
-             event_command(EVENT_CMD_VIDEO_SET_BLOCKING_STATE);
+            menu_display_ctl(MENU_DISPLAY_CTL_SET_FRAMEBUFFER_DIRTY_FLAG, NULL);
+
+            if (menu_driver_ctl(RARCH_MENU_CTL_IS_ALIVE, NULL))
+               event_command(EVENT_CMD_VIDEO_SET_BLOCKING_STATE);
 #endif
+         }
          break;
       case EVENT_CMD_CHEATS_DEINIT:
-         if (!global)
-            break;
-
-         if (global->cheat)
-            cheat_manager_free(global->cheat);
-         global->cheat = NULL;
+         cheat_manager_state_free();
          break;
       case EVENT_CMD_CHEATS_INIT:
          event_command(EVENT_CMD_CHEATS_DEINIT);
          event_init_cheats();
+         break;
+      case EVENT_CMD_CHEATS_APPLY:
+         cheat_manager_apply_cheats();
          break;
       case EVENT_CMD_REMAPPING_DEINIT:
          break;
@@ -1097,18 +1114,17 @@ bool event_command(enum event_command cmd)
          event_init_remapping();
          break;
       case EVENT_CMD_REWIND_DEINIT:
-         if (!global)
-            break;
 #ifdef HAVE_NETPLAY
-         if (driver->netplay_data)
+         if (netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_DATA_INITED, NULL))
             return false;
 #endif
-         if (global->rewind.state)
-            state_manager_free(global->rewind.state);
-         global->rewind.state = NULL;
+         state_manager_event_deinit();
          break;
       case EVENT_CMD_REWIND_INIT:
-         init_rewind();
+#ifdef HAVE_NETPLAY
+         if (!netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_DATA_INITED, NULL))
+#endif
+            init_rewind();
          break;
       case EVENT_CMD_REWIND_TOGGLE:
          if (settings->rewind_enable)
@@ -1118,113 +1134,79 @@ bool event_command(enum event_command cmd)
          break;
       case EVENT_CMD_AUTOSAVE_DEINIT:
 #ifdef HAVE_THREADS
-         event_deinit_autosave();
+         autosave_event_deinit();
 #endif
          break;
       case EVENT_CMD_AUTOSAVE_INIT:
          event_command(EVENT_CMD_AUTOSAVE_DEINIT);
 #ifdef HAVE_THREADS
-         event_init_autosave();
+         autosave_event_init();
 #endif
          break;
       case EVENT_CMD_AUTOSAVE_STATE:
          event_save_auto_state();
          break;
       case EVENT_CMD_AUDIO_STOP:
-         if (!driver->audio_data)
-            return false;
-         if (!audio_driver_alive())
+         if (!audio_driver_ctl(RARCH_AUDIO_CTL_ALIVE, NULL))
             return false;
 
-         if (!audio_driver_stop())
+         if (!audio_driver_ctl(RARCH_AUDIO_CTL_STOP, NULL))
             return false;
          break;
       case EVENT_CMD_AUDIO_START:
-         if (!driver->audio_data || audio_driver_alive())
+         if (audio_driver_ctl(RARCH_AUDIO_CTL_ALIVE, NULL))
             return false;
 
-         if (!settings->audio.mute_enable && !audio_driver_start())
+         if (!settings->audio.mute_enable && !audio_driver_ctl(RARCH_AUDIO_CTL_START, NULL))
          {
             RARCH_ERR("Failed to start audio driver. Will continue without audio.\n");
-            driver->audio_active = false;
+            audio_driver_ctl(RARCH_AUDIO_CTL_UNSET_ACTIVE, NULL);
          }
          break;
       case EVENT_CMD_AUDIO_MUTE_TOGGLE:
          {
             const char *msg = !settings->audio.mute_enable ?
-               "Audio muted." : "Audio unmuted.";
+               msg_hash_to_str(MSG_AUDIO_MUTED):
+               msg_hash_to_str(MSG_AUDIO_UNMUTED);
 
-            if (!audio_driver_mute_toggle())
+            if (!audio_driver_ctl(RARCH_AUDIO_CTL_MUTE_TOGGLE, NULL))
             {
-               RARCH_ERR("Failed to unmute audio.\n");
+               RARCH_ERR("%s.\n",
+                     msg_hash_to_str(MSG_FAILED_TO_UNMUTE_AUDIO));
                return false;
             }
 
-            rarch_main_msg_queue_push(msg, 1, 180, true);
+            runloop_msg_queue_push(msg, 1, 180, true);
             RARCH_LOG("%s\n", msg);
          }
          break;
       case EVENT_CMD_OVERLAY_DEINIT:
 #ifdef HAVE_OVERLAY
-         if (driver->overlay)
-            input_overlay_free(driver->overlay);
-         driver->overlay = NULL;
-
-         memset(&driver->overlay_state, 0, sizeof(driver->overlay_state));
+         input_overlay_free();
 #endif
          break;
       case EVENT_CMD_OVERLAY_INIT:
          event_command(EVENT_CMD_OVERLAY_DEINIT);
 #ifdef HAVE_OVERLAY
-         if (driver->osk_enable)
-         {
-            if (!*settings->osk.overlay)
-               break;
-         }
-         else
-         {
-            if (!*settings->input.overlay)
-               break;
-         }
-
-         driver->overlay = input_overlay_new(driver->osk_enable ? settings->osk.overlay : settings->input.overlay,
-               driver->osk_enable ? settings->osk.enable   : settings->input.overlay_enable,
-               settings->input.overlay_opacity, settings->input.overlay_scale);
-         if (!driver->overlay)
-            RARCH_ERR("Failed to load overlay.\n");
+         input_overlay_init();
 #endif
          break;
       case EVENT_CMD_OVERLAY_NEXT:
 #ifdef HAVE_OVERLAY
-         input_overlay_next(driver->overlay, settings->input.overlay_opacity);
+         input_overlay_next(settings->input.overlay_opacity);
 #endif
          break;
       case EVENT_CMD_DSP_FILTER_DEINIT:
-         if (!global)
-            break;
-
-         if (global->audio_data.dsp)
-            rarch_dsp_filter_free(global->audio_data.dsp);
-         global->audio_data.dsp = NULL;
+         audio_driver_dsp_filter_free();
          break;
       case EVENT_CMD_DSP_FILTER_INIT:
          event_command(EVENT_CMD_DSP_FILTER_DEINIT);
          if (!*settings->audio.dsp_plugin)
             break;
-
-         global->audio_data.dsp = rarch_dsp_filter_new(
-               settings->audio.dsp_plugin, global->audio_data.in_rate);
-         if (!global->audio_data.dsp)
-            RARCH_ERR("[DSP]: Failed to initialize DSP filter \"%s\".\n",
-                  settings->audio.dsp_plugin);
+         audio_driver_dsp_filter_init(settings->audio.dsp_plugin);
          break;
       case EVENT_CMD_GPU_RECORD_DEINIT:
-         if (!global)
-            break;
-
-         if (global->record.gpu_buffer)
-            free(global->record.gpu_buffer);
-         global->record.gpu_buffer = NULL;
+         video_driver_ctl(RARCH_DISPLAY_CTL_GPU_RECORD_DEINIT, NULL);
          break;
       case EVENT_CMD_RECORD_DEINIT:
          if (!recording_deinit())
@@ -1237,14 +1219,19 @@ bool event_command(enum event_command cmd)
          break;
       case EVENT_CMD_HISTORY_DEINIT:
          if (g_defaults.history)
+         {
+            content_playlist_write_file(g_defaults.history);
             content_playlist_free(g_defaults.history);
+         }
          g_defaults.history = NULL;
          break;
       case EVENT_CMD_HISTORY_INIT:
          event_command(EVENT_CMD_HISTORY_DEINIT);
          if (!settings->history_list_enable)
             return false;
-         RARCH_LOG("Loading history file: [%s].\n", settings->content_history_path);
+         RARCH_LOG("%s: [%s].\n",
+               msg_hash_to_str(MSG_LOADING_HISTORY_FILE),
+               settings->content_history_path);
          g_defaults.history = content_playlist_init(
                settings->content_history_path,
                settings->content_history_size);
@@ -1253,52 +1240,54 @@ bool event_command(enum event_command cmd)
          if (!global)
             break;
 
-         if (global->core_info)
-            core_info_list_free(global->core_info);
-         global->core_info = NULL;
-         break;
-      case EVENT_CMD_DATA_RUNLOOP_FREE:
-         rarch_main_data_free();
+         if (global->core_info.list)
+            core_info_list_free(global->core_info.list);
+         global->core_info.list = NULL;
          break;
       case EVENT_CMD_CORE_INFO_INIT:
          event_command(EVENT_CMD_CORE_INFO_DEINIT);
 
          if (*settings->libretro_directory)
-            global->core_info = core_info_list_new(settings->libretro_directory);
+            global->core_info.list = core_info_list_new();
          break;
       case EVENT_CMD_CORE_DEINIT:
-         event_deinit_core(true);
-         break;
+         {
+            struct retro_hw_render_callback *cb = video_driver_callback();
+            event_deinit_core(true);
+
+            if (cb)
+               memset(cb, 0, sizeof(*cb));
+
+            break;
+         }
       case EVENT_CMD_CORE_INIT:
          if (!event_init_core())
             return false;
          break;
       case EVENT_CMD_VIDEO_APPLY_STATE_CHANGES:
-         video_driver_apply_state_changes();
+         video_driver_ctl(RARCH_DISPLAY_CTL_APPLY_STATE_CHANGES, NULL);
          break;
       case EVENT_CMD_VIDEO_SET_NONBLOCKING_STATE:
          boolean = true; /* fall-through */
       case EVENT_CMD_VIDEO_SET_BLOCKING_STATE:
-         video_driver_set_nonblock_state(boolean);
+         video_driver_ctl(RARCH_DISPLAY_CTL_SET_NONBLOCK_STATE, &boolean);
          break;
       case EVENT_CMD_VIDEO_SET_ASPECT_RATIO:
-         video_driver_set_aspect_ratio(settings->video.aspect_ratio_idx);
+         video_driver_ctl(RARCH_DISPLAY_CTL_SET_ASPECT_RATIO, NULL);
          break;
       case EVENT_CMD_AUDIO_SET_NONBLOCKING_STATE:
          boolean = true; /* fall-through */
       case EVENT_CMD_AUDIO_SET_BLOCKING_STATE:
-         audio_driver_set_nonblock_state(boolean);
+         audio_driver_set_nonblocking_state(boolean);
          break;
       case EVENT_CMD_OVERLAY_SET_SCALE_FACTOR:
 #ifdef HAVE_OVERLAY
-         input_overlay_set_scale_factor(driver->overlay,
-               settings->input.overlay_scale);
+         input_overlay_set_scale_factor(settings->input.overlay_scale);
 #endif
          break;
       case EVENT_CMD_OVERLAY_SET_ALPHA_MOD:
 #ifdef HAVE_OVERLAY
-         input_overlay_set_alpha_mod(driver->overlay,
-               settings->input.overlay_opacity);
+         input_overlay_set_alpha_mod(settings->input.overlay_opacity);
 #endif
          break;
       case EVENT_CMD_DRIVERS_DEINIT:
@@ -1316,19 +1305,30 @@ bool event_command(enum event_command cmd)
          event_command(EVENT_CMD_DRIVERS_INIT);
          break;
       case EVENT_CMD_QUIT_RETROARCH:
-         rarch_main_set_state(RARCH_ACTION_STATE_FORCE_QUIT);
+         rarch_ctl(RARCH_CTL_FORCE_QUIT, NULL);
+         break;
+      case EVENT_CMD_SHUTDOWN:
+#if defined(__linux__) && !defined(ANDROID)
+         runloop_msg_queue_push("Shutting down...", 1, 180, true);
+         rarch_ctl(RARCH_CTL_FORCE_QUIT, NULL);
+         system("shutdown -P now");
+#endif
          break;
       case EVENT_CMD_RESUME:
-         rarch_main_set_state(RARCH_ACTION_STATE_MENU_RUNNING_FINISHED);
+         rarch_ctl(RARCH_CTL_MENU_RUNNING_FINISHED, NULL);
          break;
       case EVENT_CMD_RESTART_RETROARCH:
+         {
 #if defined(GEKKO) && defined(HW_RVL)
-         fill_pathname_join(global->fullpath, g_defaults.core_dir,
-               SALAMANDER_FILE,
-               sizeof(global->fullpath));
+            char new_path[PATH_MAX_LENGTH];
+            fill_pathname_join(new_path, g_defaults.dir.core, SALAMANDER_FILE, sizeof(new_path));
+            runloop_ctl(RUNLOOP_CTL_SET_CONTENT_PATH, new_path);
 #endif
-         if (driver->frontend_ctx && driver->frontend_ctx->set_fork)
-            driver->frontend_ctx->set_fork(true, false);
+            frontend_driver_set_fork(true, false);
+         }
+         break;
+      case EVENT_CMD_MENU_SAVE_CURRENT_CONFIG:
+         event_save_current_config();
          break;
       case EVENT_CMD_MENU_SAVE_CONFIG:
          if (!event_save_core_config())
@@ -1340,34 +1340,41 @@ bool event_command(enum event_command cmd)
 #endif
          break;
       case EVENT_CMD_PAUSE_CHECKS:
-         if (runloop->is_paused)
+         if (runloop_ctl(RUNLOOP_CTL_IS_PAUSED, NULL))
          {
-            RARCH_LOG("Paused.\n");
+            RARCH_LOG("%s\n", msg_hash_to_str(MSG_PAUSED));
             event_command(EVENT_CMD_AUDIO_STOP);
 
             if (settings->video.black_frame_insertion)
-               rarch_render_cached_frame();
+               video_driver_ctl(RARCH_DISPLAY_CTL_CACHED_FRAME_RENDER, NULL);
          }
          else
          {
-            RARCH_LOG("Unpaused.\n");
+            RARCH_LOG("%s\n", msg_hash_to_str(MSG_UNPAUSED));
             event_command(EVENT_CMD_AUDIO_START);
          }
          break;
       case EVENT_CMD_PAUSE_TOGGLE:
-         runloop->is_paused = !runloop->is_paused;
+         boolean = runloop_ctl(RUNLOOP_CTL_IS_PAUSED,  NULL);
+         boolean = !boolean;
+         runloop_ctl(RUNLOOP_CTL_SET_PAUSED, &boolean);
          event_command(EVENT_CMD_PAUSE_CHECKS);
          break;
       case EVENT_CMD_UNPAUSE:
-         runloop->is_paused = false;
+         boolean = false;
+
+         runloop_ctl(RUNLOOP_CTL_SET_PAUSED, &boolean);
          event_command(EVENT_CMD_PAUSE_CHECKS);
          break;
       case EVENT_CMD_PAUSE:
-         runloop->is_paused = true;
+         boolean = true;
+
+         runloop_ctl(RUNLOOP_CTL_SET_PAUSED, &boolean);
          event_command(EVENT_CMD_PAUSE_CHECKS);
          break;
       case EVENT_CMD_MENU_PAUSE_LIBRETRO:
-         if (runloop->is_menu)
+#ifdef HAVE_MENU
+         if (menu_driver_ctl(RARCH_MENU_CTL_IS_ALIVE, NULL))
          {
             if (settings->menu.pause_libretro)
                event_command(EVENT_CMD_AUDIO_STOP);
@@ -1379,36 +1386,16 @@ bool event_command(enum event_command cmd)
             if (settings->menu.pause_libretro)
                event_command(EVENT_CMD_AUDIO_START);
          }
+#endif
          break;
       case EVENT_CMD_SHADER_DIR_DEINIT:
-         if (!global)
-            break;
-
-         dir_list_free(global->shader_dir.list);
-         global->shader_dir.list = NULL;
-         global->shader_dir.ptr  = 0;
+         runloop_ctl(RUNLOOP_CTL_SHADER_DIR_DEINIT, NULL);
          break;
       case EVENT_CMD_SHADER_DIR_INIT:
          event_command(EVENT_CMD_SHADER_DIR_DEINIT);
 
-         if (!*settings->video.shader_dir)
+         if (!runloop_ctl(RUNLOOP_CTL_SHADER_DIR_INIT, NULL))
             return false;
-
-         global->shader_dir.list = dir_list_new(settings->video.shader_dir,
-               "cg|cgp|glsl|glslp", false);
-
-         if (!global->shader_dir.list || global->shader_dir.list->size == 0)
-         {
-            event_command(EVENT_CMD_SHADER_DIR_DEINIT);
-            return false;
-         }
-
-         global->shader_dir.ptr  = 0;
-         dir_list_sort(global->shader_dir.list, false);
-
-         for (i = 0; i < global->shader_dir.list->size; i++)
-            RARCH_LOG("Found shader \"%s\"\n",
-                  global->shader_dir.list->elems[i].data);
          break;
       case EVENT_CMD_SAVEFILES:
          event_save_files();
@@ -1422,37 +1409,25 @@ bool event_command(enum event_command cmd)
          global->savefiles = NULL;
          break;
       case EVENT_CMD_SAVEFILES_INIT:
-         global->use_sram = global->use_sram && !global->sram_save_disable
+         global->sram.use = global->sram.use && !global->sram.save_disable
 #ifdef HAVE_NETPLAY
-            && (!driver->netplay_data || !global->netplay_is_client)
+            && (!netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_DATA_INITED, NULL) || !global->netplay.is_client)
 #endif
             ;
 
-         if (!global->use_sram)
-            RARCH_LOG("SRAM will not be saved.\n");
+         if (!global->sram.use)
+            RARCH_LOG("%s\n",
+                  msg_hash_to_str(MSG_SRAM_WILL_NOT_BE_SAVED));
 
-         if (global->use_sram)
+         if (global->sram.use)
             event_command(EVENT_CMD_AUTOSAVE_INIT);
          break;
-      case EVENT_CMD_MSG_QUEUE_DEINIT:
-         rarch_main_msg_queue_free();
-         break;
-      case EVENT_CMD_MSG_QUEUE_INIT:
-         event_command(EVENT_CMD_MSG_QUEUE_DEINIT);
-         rarch_main_msg_queue_init();
-         rarch_main_data_init_queues();
-         break;
       case EVENT_CMD_BSV_MOVIE_DEINIT:
-         if (!global)
-            break;
-
-         if (global->bsv.movie)
-            bsv_movie_free(global->bsv.movie);
-         global->bsv.movie = NULL;
+         bsv_movie_ctl(BSV_MOVIE_CTL_DEINIT, NULL);
          break;
       case EVENT_CMD_BSV_MOVIE_INIT:
          event_command(EVENT_CMD_BSV_MOVIE_DEINIT);
-         event_init_movie();
+         bsv_movie_ctl(BSV_MOVIE_CTL_INIT, NULL);
          break;
       case EVENT_CMD_NETPLAY_DEINIT:
 #ifdef HAVE_NETPLAY
@@ -1478,44 +1453,34 @@ bool event_command(enum event_command cmd)
          break;
       case EVENT_CMD_NETPLAY_FLIP_PLAYERS:
 #ifdef HAVE_NETPLAY
-         {
-            netplay_t *netplay = (netplay_t*)driver->netplay_data;
-            if (!netplay)
-               return false;
-            netplay_flip_users(netplay);
-         }
+         netplay_driver_ctl(RARCH_NETPLAY_CTL_FLIP_PLAYERS, NULL);
 #endif
          break;
       case EVENT_CMD_FULLSCREEN_TOGGLE:
-         if (!video_driver_has_windowed())
+         if (!video_driver_ctl(RARCH_DISPLAY_CTL_HAS_WINDOWED, NULL))
             return false;
 
-         /* If we go fullscreen we drop all drivers and 
+         /* If we go fullscreen we drop all drivers and
           * reinitialize to be safe. */
          settings->video.fullscreen = !settings->video.fullscreen;
          event_command(EVENT_CMD_REINIT);
          break;
       case EVENT_CMD_COMMAND_DEINIT:
-#ifdef HAVE_COMMAND
-         if (driver->command)
-            rarch_cmd_free(driver->command);
-         driver->command = NULL;
-#endif
+         input_driver_ctl(RARCH_INPUT_CTL_COMMAND_DEINIT, NULL);
          break;
       case EVENT_CMD_COMMAND_INIT:
          event_command(EVENT_CMD_COMMAND_DEINIT);
-
-#ifdef HAVE_COMMAND
-         event_init_command();
-#endif
+         input_driver_ctl(RARCH_INPUT_CTL_COMMAND_INIT, NULL);
+         break;
+      case EVENT_CMD_REMOTE_DEINIT:
+         input_driver_ctl(RARCH_INPUT_CTL_REMOTE_DEINIT, NULL);
+         break;
+      case EVENT_CMD_REMOTE_INIT:
+         event_command(EVENT_CMD_REMOTE_DEINIT);
+         input_driver_ctl(RARCH_INPUT_CTL_REMOTE_INIT, NULL);
          break;
       case EVENT_CMD_TEMPORARY_CONTENT_DEINIT:
-         if (!global)
-            break;
-
-         if (global->temporary_content)
-            event_free_temporary_content();
-         global->temporary_content = NULL;
+         content_temporary_free();
          break;
       case EVENT_CMD_SUBSYSTEM_FULLPATHS_DEINIT:
          if (!global)
@@ -1526,32 +1491,29 @@ bool event_command(enum event_command cmd)
          global->subsystem_fullpaths = NULL;
          break;
       case EVENT_CMD_LOG_FILE_DEINIT:
-         if (!global)
-            break;
-
-         if (global->log_file)
-            fclose(global->log_file);
-         global->log_file = NULL;
+         retro_main_log_file_deinit();
          break;
       case EVENT_CMD_DISK_EJECT_TOGGLE:
-         if (global->system.disk_control.get_num_images)
+         if (info && info->disk_control.get_num_images)
          {
-            const struct retro_disk_control_callback *control = 
+            const struct retro_disk_control_callback *control =
                (const struct retro_disk_control_callback*)
-               &global->system.disk_control;
+               &info->disk_control;
 
             if (control)
                event_check_disk_eject(control);
          }
          else
-            rarch_main_msg_queue_push("Core does not support Disk Options.", 1, 120, true);
+            runloop_msg_queue_push_new(
+                  MSG_CORE_DOES_NOT_SUPPORT_DISK_OPTIONS,
+                  1, 120, true);
          break;
       case EVENT_CMD_DISK_NEXT:
-         if (global->system.disk_control.get_num_images)
+         if (info && info->disk_control.get_num_images)
          {
-            const struct retro_disk_control_callback *control = 
+            const struct retro_disk_control_callback *control =
                (const struct retro_disk_control_callback*)
-               &global->system.disk_control;
+               &info->disk_control;
 
             if (!control)
                return false;
@@ -1562,14 +1524,16 @@ bool event_command(enum event_command cmd)
             event_check_disk_next(control);
          }
          else
-            rarch_main_msg_queue_push("Core does not support Disk Options.", 1, 120, true);
+            runloop_msg_queue_push_new(
+                  MSG_CORE_DOES_NOT_SUPPORT_DISK_OPTIONS,
+                  1, 120, true);
          break;
       case EVENT_CMD_DISK_PREV:
-         if (global->system.disk_control.get_num_images)
+         if (info && info->disk_control.get_num_images)
          {
-            const struct retro_disk_control_callback *control = 
+            const struct retro_disk_control_callback *control =
                (const struct retro_disk_control_callback*)
-               &global->system.disk_control;
+               &info->disk_control;
 
             if (!control)
                return false;
@@ -1580,7 +1544,9 @@ bool event_command(enum event_command cmd)
             event_check_disk_prev(control);
          }
          else
-            rarch_main_msg_queue_push("Core does not support Disk Options.", 1, 120, true);
+            runloop_msg_queue_push_new(
+                  MSG_CORE_DOES_NOT_SUPPORT_DISK_OPTIONS,
+                  1, 120, true);
          break;
       case EVENT_CMD_RUMBLE_STOP:
          for (i = 0; i < MAX_USERS; i++)
@@ -1592,16 +1558,19 @@ bool event_command(enum event_command cmd)
       case EVENT_CMD_GRAB_MOUSE_TOGGLE:
          {
             static bool grab_mouse_state  = false;
+            bool grab_mouse_state_tmp;
 
             grab_mouse_state = !grab_mouse_state;
 
-            if (!driver->input || !input_driver_grab_mouse(grab_mouse_state))
+            if (!input_driver_grab_mouse(grab_mouse_state))
                return false;
 
-            RARCH_LOG("Grab mouse state: %s.\n",
+            RARCH_LOG("%s: %s.\n",
+                  msg_hash_to_str(MSG_GRAB_MOUSE_STATE),
                   grab_mouse_state ? "yes" : "no");
 
-            video_driver_show_mouse(!grab_mouse_state);
+            grab_mouse_state_tmp = !grab_mouse_state;
+            video_driver_ctl(RARCH_DISPLAY_CTL_SHOW_MOUSE, &grab_mouse_state_tmp);
          }
          break;
       case EVENT_CMD_PERFCNT_REPORT_FRONTEND_LOG:
@@ -1613,13 +1582,13 @@ bool event_command(enum event_command cmd)
       case EVENT_CMD_VOLUME_DOWN:
          event_set_volume(-0.5f);
          break;
+      case EVENT_CMD_SET_FRAME_LIMIT:
+         runloop_ctl(RUNLOOP_CTL_SET_FRAME_LIMIT, NULL);
+         break;
       case EVENT_CMD_NONE:
       default:
-         goto error;
+         return false;
    }
 
    return true;
-
-error:
-   return false;
 }

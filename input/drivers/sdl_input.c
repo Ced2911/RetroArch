@@ -14,23 +14,27 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdint.h>
+#include <stdlib.h>
+
+#include <boolean.h>
+
 #include "../../driver.h"
 
 #include "SDL.h"
 #include "../../gfx/video_context_driver.h"
-#include <boolean.h>
 #include "../../general.h"
-#include <stdint.h>
-#include <stdlib.h>
+#include "../../verbosity.h"
 #include "../../libretro.h"
 #include "../input_autodetect.h"
-#include "../input_common.h"
-#include "../input_joypad.h"
+#include "../input_config.h"
+#include "../input_joypad_driver.h"
 #include "../input_keymaps.h"
-#include "../keyboard_line.h"
+#include "../input_keyboard.h"
 
 typedef struct sdl_input
 {
+   bool blocked;
    const input_device_driver_t *joypad;
 
    int mouse_x, mouse_y;
@@ -40,13 +44,15 @@ typedef struct sdl_input
 
 static void *sdl_input_init(void)
 {
+   settings_t *settings;
+   sdl_input_t *sdl;
    input_keymaps_init_keyboard_lut(rarch_key_map_sdl);
-   settings_t *settings = config_get_ptr();
-   sdl_input_t *sdl = (sdl_input_t*)calloc(1, sizeof(*sdl));
+   settings = config_get_ptr();
+   sdl = (sdl_input_t*)calloc(1, sizeof(*sdl));
    if (!sdl)
       return NULL;
 
-   sdl->joypad = input_joypad_init_driver(settings->input.joypad_driver);
+   sdl->joypad = input_joypad_init_driver(settings->input.joypad_driver, sdl);
 
    RARCH_LOG("[SDL]: Input driver initialized.\n");
    return sdl;
@@ -79,8 +85,7 @@ static bool sdl_is_pressed(sdl_input_t *sdl, unsigned port_num, const struct ret
 {
    if (sdl_key_pressed(binds[key].key))
       return true;
-
-   return input_joypad_pressed(sdl->joypad, port_num, binds, key);
+   return false;
 }
 
 static int16_t sdl_analog_pressed(sdl_input_t *sdl, const struct retro_keybind *binds,
@@ -100,21 +105,45 @@ static int16_t sdl_analog_pressed(sdl_input_t *sdl, const struct retro_keybind *
    return pressed_plus + pressed_minus;
 }
 
-static bool sdl_bind_button_pressed(void *data, int key)
+static bool sdl_input_key_pressed(void *data, int key)
 {
-   settings_t *settings = config_get_ptr();
-   const struct retro_keybind *binds = settings->input.binds[0];
    if (key >= 0 && key < RARCH_BIND_LIST_END)
-      return sdl_is_pressed((sdl_input_t*)data, 0, binds, key);
+   {
+      sdl_input_t *sdl     = (sdl_input_t*)data;
+      settings_t *settings = config_get_ptr();
+      const struct retro_keybind *binds = settings->input.binds[0];
+
+      if (sdl_is_pressed(sdl, 0, binds, key))
+         return true;
+      if (input_joypad_pressed(sdl->joypad, 0, binds, key))
+         return true;
+   }
+
+   return false;
+}
+
+static bool sdl_input_meta_key_pressed(void *data, int key)
+{
    return false;
 }
 
 static int16_t sdl_joypad_device_state(sdl_input_t *sdl, const struct retro_keybind **binds_, 
-      unsigned port_num, unsigned id)
+      unsigned port_num, unsigned id, enum input_device_type *device)
 {
-   const struct retro_keybind *binds = binds_[port_num];
    if (id < RARCH_BIND_LIST_END)
-      return binds[id].valid && sdl_is_pressed(sdl, port_num, binds, id);
+   {
+      const struct retro_keybind *binds = binds_[port_num];
+      if (binds[id].valid && sdl_is_pressed(sdl, port_num, binds, id))
+      {
+         *device = INPUT_DEVICE_TYPE_KEYBOARD;
+         return 1;
+      }
+      if (binds[id].valid && input_joypad_pressed(sdl->joypad, 0, binds, id))
+      {
+         *device = INPUT_DEVICE_TYPE_JOYPAD;
+         return 1;
+      }
+   }
    return 0;
 }
 
@@ -220,12 +249,13 @@ static int16_t sdl_lightgun_device_state(sdl_input_t *sdl, unsigned id)
 static int16_t sdl_input_state(void *data_, const struct retro_keybind **binds,
       unsigned port, unsigned device, unsigned idx, unsigned id)
 {
+   enum input_device_type type = INPUT_DEVICE_TYPE_NONE;
    sdl_input_t *data = (sdl_input_t*)data_;
 
    switch (device)
    {
       case RETRO_DEVICE_JOYPAD:
-         return sdl_joypad_device_state(data, binds, port, id);
+         return sdl_joypad_device_state(data, binds, port, id, &type);
       case RETRO_DEVICE_ANALOG:
          return sdl_analog_device_state(data, binds, port, idx, id);
       case RETRO_DEVICE_MOUSE:
@@ -269,15 +299,13 @@ static void sdl_grab_mouse(void *data, bool state)
    struct temp{
       SDL_Window *w;
    };
-   sdl_input_t *sdl = (sdl_input_t*)data;
-   driver_t *driver = driver_get_ptr();
 
-   if (driver->video != &video_sdl2)
-      return;
-
-   /* First member of sdl2_video_t is the window */
-   SDL_SetWindowGrab(((struct temp*)driver->video_data)->w,
-         state ? SDL_TRUE : SDL_FALSE);
+   if (!strcmp(video_driver_get_ident(), "sdl2"))
+   {
+      /* First member of sdl2_video_t is the window */
+      SDL_SetWindowGrab(((struct temp*)video_driver_get_ptr(false))->w,
+            state ? SDL_TRUE : SDL_FALSE);
+   }
 #endif
 }
 
@@ -304,18 +332,19 @@ static void sdl_poll_mouse(sdl_input_t *sdl)
 
    SDL_GetMouseState(&sdl->mouse_abs_x, &sdl->mouse_abs_y);
 
-   sdl->mouse_l  = SDL_BUTTON(SDL_BUTTON_LEFT)      & btn ? 1 : 0;
-   sdl->mouse_r  = SDL_BUTTON(SDL_BUTTON_RIGHT)     & btn ? 1 : 0;
-   sdl->mouse_m  = SDL_BUTTON(SDL_BUTTON_MIDDLE)    & btn ? 1 : 0;
+   sdl->mouse_l  = (SDL_BUTTON(SDL_BUTTON_LEFT)      & btn) ? 1 : 0;
+   sdl->mouse_r  = (SDL_BUTTON(SDL_BUTTON_RIGHT)     & btn) ? 1 : 0;
+   sdl->mouse_m  = (SDL_BUTTON(SDL_BUTTON_MIDDLE)    & btn) ? 1 : 0;
 #ifndef HAVE_SDL2
-   sdl->mouse_wu = SDL_BUTTON(SDL_BUTTON_WHEELUP)   & btn ? 1 : 0;
-   sdl->mouse_wd = SDL_BUTTON(SDL_BUTTON_WHEELDOWN) & btn ? 1 : 0;
+   sdl->mouse_wu = (SDL_BUTTON(SDL_BUTTON_WHEELUP)   & btn) ? 1 : 0;
+   sdl->mouse_wd = (SDL_BUTTON(SDL_BUTTON_WHEELDOWN) & btn) ? 1 : 0;
 #endif
 }
 
 static void sdl_input_poll(void *data)
 {
    sdl_input_t *sdl = (sdl_input_t*)data;
+   SDL_Event event;
 
    SDL_PumpEvents();
 
@@ -323,7 +352,6 @@ static void sdl_input_poll(void *data)
       sdl->joypad->poll();
    sdl_poll_mouse(sdl);
 
-   SDL_Event event;
 #ifdef HAVE_SDL2
    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_KEYDOWN, SDL_MOUSEWHEEL) > 0)
 #else
@@ -380,11 +408,28 @@ static uint64_t sdl_get_capabilities(void *data)
    return caps;
 }
 
+static bool sdl_keyboard_mapping_is_blocked(void *data)
+{
+   sdl_input_t *sdl = (sdl_input_t*)data;
+   if (!sdl)
+      return false;
+   return sdl->blocked;
+}
+
+static void sdl_keyboard_mapping_set_block(void *data, bool value)
+{
+   sdl_input_t *sdl = (sdl_input_t*)data;
+   if (!sdl)
+      return;
+   sdl->blocked = value;
+}
+
 input_driver_t input_sdl = {
    sdl_input_init,
    sdl_input_poll,
    sdl_input_state,
-   sdl_bind_button_pressed,
+   sdl_input_key_pressed,
+   sdl_input_meta_key_pressed,
    sdl_input_free,
    NULL,
    NULL,
@@ -395,6 +440,10 @@ input_driver_t input_sdl = {
    "sdl",
 #endif
    sdl_grab_mouse,
+   NULL,
    sdl_set_rumble,
    sdl_get_joypad_driver,
+   NULL,
+   sdl_keyboard_mapping_is_blocked,
+   sdl_keyboard_mapping_set_block,
 };

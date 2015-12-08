@@ -1,7 +1,7 @@
 /*  RetroArch - A frontend for libretro.
  *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
  *  Copyright (C) 2011-2015 - Daniel De Matteis
- * 
+ *
  *  RetroArch is free software: you can redistribute it and/or modify it under the terms
  *  of the GNU General Public License as published by the Free Software Found-
  *  ation, either version 3 of the License, or (at your option) any later version.
@@ -19,9 +19,15 @@
 static uint64_t pad_state;
 static int16_t analog_state[1][2][2];
 
+extern uint64_t lifecycle_state;
+
 static const char *psp_joypad_name(unsigned pad)
 {
+#ifdef VITA
+   return "Vita Controller";
+#else
    return "PSP Controller";
+#endif
 }
 
 static void psp_joypad_autodetect_add(unsigned autoconf_pad)
@@ -40,19 +46,21 @@ static void psp_joypad_autodetect_add(unsigned autoconf_pad)
    input_config_autoconfigure_joypad(&params);
 }
 
-static bool psp_joypad_init(void)
+static bool psp_joypad_init(void *data)
 {
+   (void)data;
+
    psp_joypad_autodetect_add(0);
 
    return true;
 }
 
-static bool psp_joypad_button(unsigned port_num, uint16_t joykey)
+static bool psp_joypad_button(unsigned port_num, uint16_t key)
 {
    if (port_num >= MAX_PADS)
       return false;
 
-   return (pad_state & (1ULL << joykey));
+   return (pad_state & (UINT64_C(1) << key));
 }
 
 static uint64_t psp_joypad_get_buttons(unsigned port_num)
@@ -108,9 +116,8 @@ static int16_t psp_joypad_axis(unsigned port_num, uint32_t joyaxis)
 static void psp_joypad_poll(void)
 {
    int32_t ret;
+   unsigned i, j;
    SceCtrlData state_tmp;
-   global_t *global          = global_get_ptr();
-   uint64_t *lifecycle_state = (uint64_t*)&global->lifecycle_state;
 
 #ifdef PSP
    sceCtrlSetSamplingCycle(0);
@@ -122,47 +129,47 @@ static void psp_joypad_poll(void)
 #endif
    (void)ret;
 
-   analog_state[0][0][0] = analog_state[0][0][1] = 
+   analog_state[0][0][0] = analog_state[0][0][1] =
       analog_state[0][1][0] = analog_state[0][1][1] = 0;
    pad_state = 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_LEFT) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_LEFT) : 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_DOWN) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_DOWN) : 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_RIGHT) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_RIGHT) : 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_UP) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_UP) : 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_START) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_START) : 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_SELECT) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_SELECT) : 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_TRIANGLE) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_X) : 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_SQUARE) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_Y) : 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_CROSS) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_B) : 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_CIRCLE) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_A) : 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_R) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_R) : 0;
-   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_L) ? (1ULL << RETRO_DEVICE_ID_JOYPAD_L) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_LEFT) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_LEFT) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_DOWN) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_DOWN) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_RIGHT) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_RIGHT) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_UP) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_UP) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_START) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_START) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_SELECT) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_SELECT) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_TRIANGLE) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_X) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_SQUARE) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_Y) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_CROSS) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_B) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_CIRCLE) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_A) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_R) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_R) : 0;
+   pad_state |= (STATE_BUTTON(state_tmp) & PSP_CTRL_L) ? (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_L) : 0;
 
    analog_state[0][RETRO_DEVICE_INDEX_ANALOG_LEFT] [RETRO_DEVICE_ID_ANALOG_X] = (int16_t)(STATE_ANALOGLX(state_tmp)-128) * 256;
    analog_state[0][RETRO_DEVICE_INDEX_ANALOG_LEFT] [RETRO_DEVICE_ID_ANALOG_Y] = (int16_t)(STATE_ANALOGLY(state_tmp)-128) * 256;
-#ifdef SN_TARGET_PSP2
+#if defined(SN_TARGET_PSP2) || defined(VITA)
    analog_state[0][RETRO_DEVICE_INDEX_ANALOG_RIGHT][RETRO_DEVICE_ID_ANALOG_X] = (int16_t)(STATE_ANALOGRX(state_tmp)-128) * 256;
    analog_state[0][RETRO_DEVICE_INDEX_ANALOG_RIGHT][RETRO_DEVICE_ID_ANALOG_Y] = (int16_t)(STATE_ANALOGRY(state_tmp)-128) * 256;
 #endif
 
-   for (int i = 0; i < 2; i++)
-      for (int j = 0; j < 2; j++)
+   for (i = 0; i < 2; i++)
+      for (j = 0; j < 2; j++)
          if (analog_state[0][i][j] == -0x8000)
             analog_state[0][i][j] = -0x7fff;
 
-   *lifecycle_state &= ~((1ULL << RARCH_MENU_TOGGLE));
+   BIT64_CLEAR(lifecycle_state, RARCH_MENU_TOGGLE);
 
 #ifdef HAVE_KERNEL_PRX
    if (STATE_BUTTON(state_tmp) & PSP_CTRL_NOTE)
 #else
       if (
-            (pad_state & (1ULL << RETRO_DEVICE_ID_JOYPAD_L))
-            && (pad_state & (1ULL << RETRO_DEVICE_ID_JOYPAD_R))
-            && (pad_state & (1ULL << RETRO_DEVICE_ID_JOYPAD_SELECT))
-            && (pad_state & (1ULL << RETRO_DEVICE_ID_JOYPAD_START))
+            (pad_state & (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_L))
+            && (pad_state & (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_R))
+            && (pad_state & (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_SELECT))
+            && (pad_state & (UINT64_C(1) << RETRO_DEVICE_ID_JOYPAD_START))
          )
 #endif
-         *lifecycle_state |= (1ULL << RARCH_MENU_TOGGLE);
+         BIT64_SET(lifecycle_state, RARCH_MENU_TOGGLE);
 }
 
 static bool psp_joypad_query_pad(unsigned pad)
@@ -185,5 +192,9 @@ input_device_driver_t psp_joypad = {
    psp_joypad_poll,
    NULL,
    psp_joypad_name,
+#ifdef VITA
+   "vita",
+#else
    "psp",
+#endif
 };

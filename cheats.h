@@ -23,26 +23,13 @@
 extern "C" {
 #endif
 
-struct item_cheat
-{
-   char *desc;
-   bool state;
-   char *code;
-};
-
-struct cheat_manager
-{
-   struct item_cheat *cheats;
-   unsigned ptr;
-   unsigned size;
-   unsigned buf_size;
-};
-
 typedef struct cheat_manager cheat_manager_t;
+
+unsigned cheat_manager_get_size(void);
 
 cheat_manager_t *cheat_manager_new(unsigned size);
 
-cheat_manager_t *cheat_manager_load(const char *path);
+bool cheat_manager_load(const char *path);
 
 /**
  * cheat_manager_save:
@@ -52,11 +39,13 @@ cheat_manager_t *cheat_manager_load(const char *path);
  *
  * Returns: true (1) if successful, otherwise false (0).
  **/
-bool cheat_manager_save(cheat_manager_t *handle, const char *path);
+bool cheat_manager_save(const char *path);
 
-bool cheat_manager_realloc(cheat_manager_t *handle, unsigned new_size);
+bool cheat_manager_realloc(unsigned new_size);
 
-void cheat_manager_free(cheat_manager_t *handle);
+void cheat_manager_set_code(unsigned index, const char *str);
+
+void cheat_manager_free(void);
 
 void cheat_manager_index_next(cheat_manager_t *handle);
 
@@ -64,9 +53,28 @@ void cheat_manager_index_prev(cheat_manager_t *handle);
 
 void cheat_manager_toggle(cheat_manager_t *handle);
 
-void cheat_manager_apply_cheats(cheat_manager_t *handle);
+void cheat_manager_apply_cheats(void);
 
 void cheat_manager_update(cheat_manager_t *handle, unsigned handle_idx);
+
+void cheat_manager_toggle_index(unsigned i);
+
+unsigned cheat_manager_get_buf_size(void);
+
+const char *cheat_manager_get_desc(unsigned i);
+
+const char *cheat_manager_get_code(unsigned i);
+
+bool cheat_manager_get_code_state(unsigned i);
+
+void cheat_manager_state_checks(
+      bool cheat_index_plus_pressed,
+      bool cheat_index_minus_pressed,
+      bool cheat_toggle_pressed);
+
+void cheat_manager_state_free(void);
+
+bool cheat_manager_alloc_if_empty(void);
 
 #ifdef __cplusplus
 }

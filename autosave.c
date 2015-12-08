@@ -14,13 +14,27 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "autosave.h"
-#include <rthreads/rthreads.h>
-#include <stdlib.h>
-#include <boolean.h>
-#include <string.h>
 #include <stdio.h>
-#include "general.h"
+#include <stdlib.h>
+#include <string.h>
+
+#include <boolean.h>
+
+#include <string/string_list.h>
+#include <rthreads/rthreads.h>
+
+#include "autosave.h"
+#include "configuration.h"
+#include "msg_hash.h"
+#include "runloop.h"
+#include "verbosity.h"
+
+/* Autosave support. */
+struct autosave_st
+{
+   autosave_t **list;
+   unsigned num;
+};
 
 struct autosave
 {
@@ -37,6 +51,8 @@ struct autosave
    size_t bufsize;
    unsigned interval;
 };
+
+static struct autosave_st autosave_state;
 
 /**
  * autosave_lock:
@@ -73,7 +89,7 @@ static void autosave_thread(void *data)
 
    while (!save->quit)
    {
-      bool differ = false;
+      bool differ;
 
       autosave_lock(save);
       differ = memcmp(save->buffer, save->retro_buffer,
@@ -139,10 +155,10 @@ autosave_t *autosave_new(const char *path, const void *data, size_t size,
    if (!handle)
       return NULL;
 
-   handle->bufsize = size;
-   handle->interval = interval;
-   handle->path = path;
-   handle->buffer = malloc(size);
+   handle->bufsize      = size;
+   handle->interval     = interval;
+   handle->path         = path;
+   handle->buffer       = malloc(size);
    handle->retro_buffer = data;
 
    if (!handle->buffer)
@@ -152,11 +168,11 @@ autosave_t *autosave_new(const char *path, const void *data, size_t size,
    }
    memcpy(handle->buffer, handle->retro_buffer, handle->bufsize);
 
-   handle->lock = slock_new();
-   handle->cond_lock = slock_new();
-   handle->cond = scond_new();
+   handle->lock         = slock_new();
+   handle->cond_lock    = slock_new();
+   handle->cond         = scond_new();
 
-   handle->thread = sthread_create(autosave_thread, handle);
+   handle->thread       = sthread_create(autosave_thread, handle);
 
    return handle;
 }
@@ -194,12 +210,11 @@ void autosave_free(autosave_t *handle)
 void lock_autosave(void)
 {
    unsigned i;
-   global_t *global = global_get_ptr();
 
-   for (i = 0; i < global->num_autosave; i++)
+   for (i = 0; i < autosave_state.num; i++)
    {
-      if (global->autosave[i])
-         autosave_lock(global->autosave[i]);
+      if (autosave_state.list[i])
+         autosave_lock(autosave_state.list[i]);
    }
 }
 
@@ -211,13 +226,57 @@ void lock_autosave(void)
 void unlock_autosave(void)
 {
    unsigned i;
-   global_t *global = global_get_ptr();
 
-   for (i = 0; i < global->num_autosave; i++)
+   for (i = 0; i < autosave_state.num; i++)
    {
-      if (global->autosave[i])
-         autosave_unlock(global->autosave[i]);
+      if (autosave_state.list[i])
+         autosave_unlock(autosave_state.list[i]);
    }
 }
 
+void autosave_event_init(void)
+{
+   unsigned i;
+   settings_t *settings = config_get_ptr();
+   global_t   *global   = global_get_ptr();
 
+   if (settings->autosave_interval < 1 || !global->savefiles)
+      return;
+
+   if (!(autosave_state.list = (autosave_t**)calloc(global->savefiles->size,
+               sizeof(*autosave_state.list))))
+      return;
+
+   autosave_state.num = global->savefiles->size;
+
+   for (i = 0; i < global->savefiles->size; i++)
+   {
+      const char *path = global->savefiles->elems[i].data;
+      unsigned    type = global->savefiles->elems[i].attr.i;
+
+      if (core.retro_get_memory_size(type) <= 0)
+         continue;
+
+      autosave_state.list[i] = autosave_new(path,
+            core.retro_get_memory_data(type),
+            core.retro_get_memory_size(type),
+            settings->autosave_interval);
+
+      if (!autosave_state.list[i])
+         RARCH_WARN("%s\n", msg_hash_to_str(MSG_AUTOSAVE_FAILED));
+   }
+}
+
+void autosave_event_deinit(void)
+{
+   unsigned i;
+
+   for (i = 0; i < autosave_state.num; i++)
+      autosave_free(autosave_state.list[i]);
+
+   if (autosave_state.list)
+      free(autosave_state.list);
+
+   autosave_state.list     = NULL;
+   autosave_state.num      = 0;
+}

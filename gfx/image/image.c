@@ -24,9 +24,10 @@
 #endif
 #include <formats/tga.h>
 #ifdef _XBOX1
-#include "../d3d/d3d_wrapper.h"
+#include "../common/d3d_common.h"
 #endif
 #include "../../file_ops.h"
+#include "../../verbosity.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -35,18 +36,45 @@
 #include <boolean.h>
 #include "../../general.h"
 
-#if defined(__CELLOS_LV2__) || defined(__PSLIGHT__)
-#include "../../ps3/sdk_defines.h"
+bool texture_image_set_color_shifts(unsigned *r_shift, unsigned *g_shift,
+      unsigned *b_shift, unsigned *a_shift)
+{
+   bool use_rgba        = video_driver_ctl(RARCH_DISPLAY_CTL_SUPPORTS_RGBA, NULL);
+   *a_shift             = 24;
+   *r_shift             = use_rgba ? 0 : 16;
+   *g_shift             = 8;
+   *b_shift             = use_rgba ? 16 : 0;
 
-#ifdef __PSL1GHT__
-#include <ppu-asm.h>
-#include <ppu-types.h>
-#include <pngdec/pngdec.h>
-#else
-#include <cell/codec.h>
-#endif
+   return use_rgba;
+}
 
-#endif
+bool texture_image_color_convert(unsigned r_shift,
+      unsigned g_shift, unsigned b_shift, unsigned a_shift,
+      struct texture_image *out_img)
+{
+   /* This is quite uncommon. */
+   if (a_shift != 24 || r_shift != 16 || g_shift != 8 || b_shift != 0)
+   {
+      uint32_t i;
+      uint32_t num_pixels = out_img->width * out_img->height;
+      uint32_t *pixels    = (uint32_t*)out_img->pixels;
+
+      for (i = 0; i < num_pixels; i++)
+      {
+         uint32_t col = pixels[i];
+         uint8_t a    = (uint8_t)(col >> 24);
+         uint8_t r    = (uint8_t)(col >> 16);
+         uint8_t g    = (uint8_t)(col >>  8);
+         uint8_t b    = (uint8_t)(col >>  0);
+         pixels[i]    = (a << a_shift) |
+            (r << r_shift) | (g << g_shift) | (b << b_shift);
+      }
+
+      return true;
+   }
+
+   return false;
+}
 
 #ifdef HAVE_RPNG
 static bool rpng_image_load_argb_shift(const char *path,
@@ -58,26 +86,14 @@ static bool rpng_image_load_argb_shift(const char *path,
          &out_img->pixels, &out_img->width, &out_img->height);
 
    if (!ret)
-      return false;
-
-   /* This is quite uncommon. */
-   if (a_shift != 24 || r_shift != 16 || g_shift != 8 || b_shift != 0)
    {
-      uint32_t i;
-      uint32_t num_pixels = out_img->width * out_img->height;
-      uint32_t *pixels    = (uint32_t*)out_img->pixels;
-
-      for (i = 0; i < num_pixels; i++)
-      {
-         uint32_t col = pixels[i];
-         uint8_t a = (uint8_t)(col >> 24);
-         uint8_t r = (uint8_t)(col >> 16);
-         uint8_t g = (uint8_t)(col >>  8);
-         uint8_t b = (uint8_t)(col >>  0);
-         pixels[i] = (a << a_shift) |
-            (r << r_shift) | (g << g_shift) | (b << b_shift);
-      }
+      out_img->pixels = NULL;
+      out_img->width  = out_img->height = 0;
+      return false;
    }
+
+   texture_image_color_convert(r_shift, g_shift, b_shift,
+         a_shift, out_img);
 
    return true;
 }
@@ -168,8 +184,7 @@ void texture_image_free(struct texture_image *img)
 bool texture_image_load(struct texture_image *out_img, const char *path)
 {
    D3DXIMAGE_INFO m_imageInfo;
-   driver_t *driver     = driver_get_ptr();
-   d3d_video_t *d3d     = (d3d_video_t*)driver->video_data;
+   d3d_video_t *d3d     = (d3d_video_t*)video_driver_get_ptr(false);
    LPDIRECT3DTEXTURE d3dt = (LPDIRECT3DTEXTURE)out_img->texture_buf;
    LPDIRECT3DVERTEXBUFFER d3dv = (LPDIRECT3DVERTEXBUFFER)out_img->vertex_buf;
 
@@ -199,191 +214,23 @@ bool texture_image_load(struct texture_image *out_img, const char *path)
 
    return true;
 }
-#elif defined(__CELLOS_LV2__)
-typedef struct CtrlMallocArg
-{
-   uint32_t mallocCallCounts;
-} CtrlMallocArg;
-
-typedef struct CtrlFreeArg
-{
-   uint32_t freeCallCounts;
-} CtrlFreeArg;
-
-void *img_malloc(uint32_t size, void *a)
-{
-#ifndef __PSL1GHT__
-   CtrlMallocArg *arg;
-   arg = (CtrlMallocArg *) a;
-   arg->mallocCallCounts++;
-#endif
-
-   return malloc(size);
-}
-
-static int img_free(void *ptr, void *a)
-{
-#ifndef __PSL1GHT__
-   CtrlFreeArg *arg;
-   arg = (CtrlFreeArg *) a;
-   arg->freeCallCounts++;
-#endif
-
-   free(ptr);
-   return 0;
-}
-
-static bool ps3_load_png(const char *path, struct texture_image *out_img)
-{
-#ifdef __PSL1GHT__
-   uint64_t output_bytes_per_line;
-#else
-   CtrlMallocArg                 MallocArg;
-   CtrlFreeArg                   FreeArg;
-   CellPngDecDataCtrlParam       dCtrlParam;
-#endif
-   CellPngDecThreadInParam       InParam;
-   CellPngDecThreadOutParam      OutParam;
-   CellPngDecSrc                 src;
-   CellPngDecOpnInfo             opnInfo;
-   CellPngDecInfo                info;
-   CellPngDecInParam             inParam;
-   CellPngDecOutParam            outParam;
-   CellPngDecDataOutInfo         dOutInfo;
-   size_t                        img_size;
-   int                           ret_png, ret = -1;
-   CellPngDecMainHandle          mHandle = PTR_NULL;
-   CellPngDecSubHandle           sHandle = PTR_NULL;
-
-   InParam.spu_enable         = CELL_PNGDEC_SPU_THREAD_ENABLE;
-   InParam.ppu_prio           = 512;
-   InParam.spu_prio           = 200;
-#ifdef __PSL1GHT__
-   InParam.malloc_func        = __get_addr32(__get_opd32(img_malloc));
-   InParam.free_func          = __get_addr32(__get_opd32(img_free));
-   InParam.malloc_arg         = 0;
-   InParam.free_arg           = 0;
-#else
-   MallocArg.mallocCallCounts = 0;
-   FreeArg.freeCallCounts     = 0;
-   InParam.malloc_func        = img_malloc;
-   InParam.malloc_arg         = &MallocArg;
-   InParam.free_func          = img_free;
-   InParam.free_arg           = &FreeArg;
-#endif
-
-   ret_png = cellPngDecCreate(&mHandle, &InParam, &OutParam);
-
-   if (ret_png != CELL_OK)
-      goto error;
-
-   memset(&src, 0, sizeof(CellPngDecSrc));
-
-   src.stream_select    = CELL_PNGDEC_FILE;
-#ifdef __PSL1GHT__
-   src.file_name        = __get_addr32(path);
-#else
-   src.file_name        = path;
-#endif
-   src.file_offset      = 0;
-   src.file_size        = 0;
-   src.stream_ptr       = 0;
-   src.stream_size      = 0;
-   src.spu_enable       = CELL_PNGDEC_SPU_THREAD_ENABLE;
-
-   ret = cellPngDecOpen(mHandle, &sHandle, &src, &opnInfo);
-
-   if (ret != CELL_OK)
-      goto error;
-
-   ret = cellPngDecReadHeader(mHandle, sHandle, &info);
-
-   if (ret != CELL_OK)
-      goto error;
-
-   inParam.cmd_ptr            = PTR_NULL;
-   inParam.output_mode        = CELL_PNGDEC_TOP_TO_BOTTOM;
-   inParam.color_space        = CELL_PNGDEC_ARGB;
-   inParam.bit_depth          = 8;
-   inParam.pack_flag          = CELL_PNGDEC_1BYTE_PER_1PIXEL;
-   inParam.alpha_select       = CELL_PNGDEC_STREAM_ALPHA;
-
-   ret = cellPngDecSetParameter(mHandle, sHandle, &inParam, &outParam);
-
-   if (ret != CELL_OK)
-      goto error;
-
-   img_size = outParam.output_width * 
-      outParam.output_height * sizeof(uint32_t);
-   out_img->pixels = (uint32_t*)malloc(img_size);
-
-   if (!out_img->pixels)
-      goto error;
-
-   memset(out_img->pixels, 0, img_size);
-
-#ifdef __PSL1GHT__
-   output_bytes_per_line = outParam.output_width * 4;
-   ret = cellPngDecDecodeData(mHandle, sHandle, (uint8_t*)
-         out_img->pixels, &output_bytes_per_line, &dOutInfo);
-#else
-   dCtrlParam.output_bytes_per_line = outParam.output_width * 4;
-   ret = cellPngDecDecodeData(mHandle, sHandle, (uint8_t*)
-         out_img->pixels, &dCtrlParam, &dOutInfo);
-#endif
-
-   if (ret != CELL_OK || dOutInfo.status != CELL_PNGDEC_DEC_STATUS_FINISH)
-      goto error;
-
-   out_img->width = outParam.output_width;
-   out_img->height = outParam.output_height;
-
-   cellPngDecClose(mHandle, sHandle);
-   cellPngDecDestroy(mHandle);
-
-   return true;
-
-error:
-   if (out_img->pixels)
-      free(out_img->pixels);
-   out_img->pixels = 0;
-   if (mHandle && sHandle)
-      cellPngDecClose(mHandle, sHandle);
-   if (mHandle)
-      cellPngDecDestroy(mHandle);
-
-   return false;
-}
-
-bool texture_image_load(struct texture_image *out_img, const char *path)
-{
-   if (!out_img)
-      return false;
-
-   if (!ps3_load_png(path, out_img))
-      return false;
-
-   return true;
-}
 #else
 bool texture_image_load(struct texture_image *out_img, const char *path)
 {
-   driver_t *driver = driver_get_ptr();
+   unsigned r_shift, g_shift, b_shift, a_shift;
+   bool ret = false;
 
-   /* This interface "leak" is very ugly. FIXME: Fix this properly ... */
-   bool ret         = false;
-   bool use_rgba    = driver->gfx_use_rgba;
-   unsigned a_shift = 24;
-   unsigned r_shift = use_rgba ? 0 : 16;
-   unsigned g_shift = 8;
-   unsigned b_shift = use_rgba ? 16 : 0;
+   texture_image_set_color_shifts(&r_shift, &g_shift, &b_shift,
+         &a_shift);
+
+   (void)ret;
 
    if (strstr(path, ".tga"))
    {
-      void *raw_buf = NULL;
-      uint8_t *buf = NULL;
       ssize_t len;
-      bool ret = read_file(path, &raw_buf, &len);
+      void *raw_buf = NULL;
+      uint8_t *buf  = NULL;
+      ret = read_file(path, &raw_buf, &len);
 
       if (!ret || len < 0)
       {
@@ -418,7 +265,6 @@ bool texture_image_load(struct texture_image *out_img, const char *path)
 #endif
 
 #endif
-
 
    return ret;
 }

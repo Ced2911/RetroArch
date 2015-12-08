@@ -12,14 +12,12 @@
  *  You should have received a copy of the GNU General Public License along with RetroArch.
  *  If not, see <http://www.gnu.org/licenses/>.
  */
-
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
-#include "../../driver.h"
-#include "../../general.h"
+#include <stdint.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#include <errno.h>
 
 #ifdef HAVE_OSS_BSD
 #include <soundcard.h>
@@ -27,11 +25,15 @@
 #include <sys/soundcard.h>
 #endif
 
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
-#include <errno.h>
-#include <stdint.h>
+#include <retro_endianness.h>
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include "../audio_driver.h"
+#include "../../configuration.h"
+#include "../../verbosity.h"
 
 #ifdef HAVE_OSS_BSD
 #define DEFAULT_OSS_DEV "/dev/audio"
@@ -47,13 +49,10 @@ static void *oss_init(const char *device, unsigned rate, unsigned latency)
    int *fd = (int*)calloc(1, sizeof(int));
    settings_t *settings = config_get_ptr();
 
+   const char *oss_device = device ? device : DEFAULT_OSS_DEV;
+   
    if (fd == NULL)
       return NULL;
-
-   const char *oss_device = DEFAULT_OSS_DEV;
-
-   if (device != NULL)
-      oss_device = device;
 
    if ((*fd = open(oss_device, O_WRONLY)) < 0)
    {

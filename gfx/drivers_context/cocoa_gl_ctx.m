@@ -14,7 +14,11 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <CoreGraphics/CGGeometry.h>
+#if TARGET_OS_IPHONE
+#include <CoreGraphics/CoreGraphics.h>
+#else
+#include <ApplicationServices/ApplicationServices.h>
+#endif
 #if defined(HAVE_COCOA)
 #include <OpenGL/CGLTypes.h>
 #include <OpenGL/OpenGL.h>
@@ -23,11 +27,14 @@
 #elif defined(HAVE_COCOATOUCH)
 #include <GLKit/GLKit.h>
 #endif
+
+#include <retro_assert.h>
+
 #import "../../ui/drivers/cocoa/cocoa_common.h"
 #include "../video_context_driver.h"
-#include "../video_monitor.h"
 #include "../../configuration.h"
 #include "../../runloop.h"
+#include "../../verbosity.h"
 
 #if defined(HAVE_COCOATOUCH)
 #define GLContextClass EAGLContext
@@ -71,7 +78,6 @@ static bool g_is_syncing = true;
 static bool g_use_hw_ctx;
 
 #if defined(HAVE_COCOA)
-static bool g_has_went_fullscreen;
 static NSOpenGLPixelFormat* g_format;
 #endif
 
@@ -114,7 +120,7 @@ void cocoagl_bind_game_view_fbo(void)
 }
 #endif
 
-static RAScreen* get_chosen_screen(void)
+void *get_chosen_screen(void)
 {
 #if defined(HAVE_COCOA) && !defined(MAC_OS_X_VERSION_10_6)
 	return [RAScreen mainScreen];
@@ -123,18 +129,22 @@ static RAScreen* get_chosen_screen(void)
    if (settings->video.monitor_index >= RAScreen.screens.count)
    {
       RARCH_WARN("video_monitor_index is greater than the number of connected monitors; using main screen instead.\n");
-      return RAScreen.mainScreen;
+      return (__bridge void*)RAScreen.mainScreen;
    }
 	
    NSArray *screens = [RAScreen screens];
-   return (RAScreen*)[screens objectAtIndex:settings->video.monitor_index];
+   return ((__bridge void*)[screens objectAtIndex:settings->video.monitor_index]);
 #endif
 }
 
 void cocoagl_gfx_ctx_update(void)
 {
 #if defined(HAVE_COCOA)
+#if MAC_OS_X_VERSION_10_7
+   CGLUpdateContext(g_context.CGLContextObj);
+#else
 	[g_context update];
+#endif
 #endif
 }
 
@@ -144,6 +154,9 @@ static bool cocoagl_gfx_ctx_init(void *data)
     
 #if defined(HAVE_COCOA)
     CocoaView *g_view = (CocoaView*)nsview_get_ptr();
+#if MAC_OS_X_VERSION_10_7
+    [g_view setWantsBestResolutionOpenGLSurface:YES];
+#endif
     NSOpenGLPixelFormatAttribute attributes [] = {
         NSOpenGLPFAColorSize, 24,
         NSOpenGLPFADoubleBuffer,
@@ -192,9 +205,7 @@ static void cocoagl_gfx_ctx_destroy(void *data)
 
    [GLContextClass clearCurrentContext];
 
-#if defined(HAVE_COCOATOUCH)
-   g_view.context = nil;
-#elif defined(HAVE_COCOA)
+#if defined(HAVE_COCOA)
     [g_context clearDrawable];
     if (g_context)
         [g_context release];
@@ -241,27 +252,47 @@ static void cocoagl_gfx_ctx_swap_interval(void *data, unsigned interval)
 #endif
 }
 
-static bool cocoagl_gfx_ctx_set_video_mode(void *data, unsigned width, unsigned height, bool fullscreen)
+static void cocoagl_gfx_ctx_show_mouse(void *data, bool state)
+{
+    (void)data;
+    
+#ifdef HAVE_COCOA
+    if (state)
+        [NSCursor unhide];
+    else
+        [NSCursor hide];
+#endif
+}
+
+static bool cocoagl_gfx_ctx_set_video_mode(void *data,
+        unsigned width, unsigned height, bool fullscreen)
 {
 #if defined(HAVE_COCOA)
+   static bool has_went_fullscreen = false;
    CocoaView *g_view = (CocoaView*)nsview_get_ptr();
    /* TODO: Screen mode support. */
    
-   if (fullscreen && !g_has_went_fullscreen)
+   if (fullscreen)
    {
-      [g_view enterFullScreenMode:get_chosen_screen() withOptions:nil];
-      [NSCursor hide];
+       if (!has_went_fullscreen)
+       {
+           [g_view enterFullScreenMode:get_chosen_screen() withOptions:nil];
+           cocoagl_gfx_ctx_show_mouse(data, false);
+       }
    }
-   else if (!fullscreen && g_has_went_fullscreen)
+   else
    {
-      [g_view exitFullScreenModeWithOptions:nil];
-      [[g_view window] makeFirstResponder:g_view];
-      [NSCursor unhide];
+      if (has_went_fullscreen)
+      {
+          [g_view exitFullScreenModeWithOptions:nil];
+          [[g_view window] makeFirstResponder:g_view];
+          cocoagl_gfx_ctx_show_mouse(data, true);
+      }
+       
+       [[g_view window] setContentSize:NSMakeSize(width, height)];
    }
    
-   g_has_went_fullscreen = fullscreen;
-   if (!g_has_went_fullscreen)
-      [[g_view window] setContentSize:NSMakeSize(width, height)];
+   has_went_fullscreen = fullscreen;
 #endif
     
    (void)data;
@@ -286,7 +317,7 @@ float cocoagl_gfx_ctx_get_native_scale(void)
 {
     static float ret = 0.0f;
     SEL selector = NSSelectorFromString(BOXSTRING("nativeScale"));
-    RAScreen *screen = (RAScreen*)get_chosen_screen();
+    RAScreen *screen = (__bridge RAScreen*)get_chosen_screen();
     
     if (ret != 0.0f)
        return ret;
@@ -304,14 +335,21 @@ float cocoagl_gfx_ctx_get_native_scale(void)
 
 static void cocoagl_gfx_ctx_get_video_size(void *data, unsigned* width, unsigned* height)
 {
-   RAScreen *screen = (RAScreen*)get_chosen_screen();
+   RAScreen *screen = (__bridge RAScreen*)get_chosen_screen();
    CGRect size = screen.bounds;
    float screenscale = cocoagl_gfx_ctx_get_native_scale();
 	
 #if defined(HAVE_COCOA)
    CocoaView *g_view = (CocoaView*)nsview_get_ptr();
-   CGRect cgrect = NSRectToCGRect([g_view frame]);
-   size = CGRectMake(0, 0, CGRectGetWidth(cgrect), CGRectGetHeight(cgrect));
+   #if MAC_OS_X_VERSION_10_7
+      NSRect backingBounds = [g_view convertRectToBacking:[g_view bounds]];
+      GLsizei backingPixelWidth = (GLsizei)(backingBounds.size.width),
+		      backingPixelHeight = (GLsizei)(backingBounds.size.height);
+      size = CGRectMake(0, 0, backingPixelWidth, backingPixelHeight);
+   #else
+      CGRect cgrect = NSRectToCGRect([g_view frame]);
+      size = CGRectMake(0, 0, CGRectGetWidth(cgrect), CGRectGetHeight(cgrect));
+   #endif
 #else
    size = g_view.bounds;
 #endif
@@ -322,7 +360,8 @@ static void cocoagl_gfx_ctx_get_video_size(void *data, unsigned* width, unsigned
 
 static void cocoagl_gfx_ctx_update_window_title(void *data)
 {
-   static char buf[128], buf_fps[128];
+   static char buf[128] = {0};
+   static char buf_fps[128] = {0};
    bool got_text = video_monitor_get_fps(buf, sizeof(buf),
          buf_fps, sizeof(buf_fps));
    settings_t *settings = config_get_ptr();
@@ -336,14 +375,14 @@ static void cocoagl_gfx_ctx_update_window_title(void *data)
        [[g_view window] setTitle:[NSString stringWithCString:text encoding:NSUTF8StringEncoding]];
 #endif
     if (settings->fps_show)
-        rarch_main_msg_queue_push(buf_fps, 1, 1, false);
+        runloop_msg_queue_push(buf_fps, 1, 1, false);
 }
 
 static bool cocoagl_gfx_ctx_get_metrics(void *data, enum display_metric_types type,
             float *value)
 {
+   RAScreen *screen = (__bridge RAScreen*)get_chosen_screen();
 #if defined(HAVE_COCOA)
-    RAScreen *screen              = [RAScreen mainScreen];
     NSDictionary *description     = [screen deviceDescription];
     NSSize  display_pixel_size    = [[description objectForKey:NSDeviceSize] sizeValue];
     CGSize  display_physical_size = CGDisplayScreenSize(
@@ -353,13 +392,17 @@ static bool cocoagl_gfx_ctx_get_metrics(void *data, enum display_metric_types ty
     float   display_height        = display_pixel_size.height;
     float   physical_width        = display_physical_size.width;
     float   physical_height       = display_physical_size.height;
+#if MAC_OS_X_VERSION_10_7
     float   scale                 = screen.backingScaleFactor;
+#else
+	float   scale                 = 1.0f;
+#endif
     float   dpi                   = (display_width/ physical_width) * 25.4f * scale;
 #elif defined(HAVE_COCOATOUCH)
     float   scale                 = cocoagl_gfx_ctx_get_native_scale();
-    CGRect  screen_rect           = [[UIScreen mainScreen] bounds];
+    CGRect  screen_rect           = [screen bounds];
     
-    float   display_width         = screen_rect.size.width;
+    //float   display_width         = screen_rect.size.width;
     float   display_height        = screen_rect.size.height;
     float   physical_width        = screen_rect.size.width  * scale;
     float   physical_height       = screen_rect.size.height * scale;

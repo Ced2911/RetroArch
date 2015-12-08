@@ -21,19 +21,23 @@
 #include <string.h>
 #include <limits.h>
 
+#include <compat/posix_string.h>
+#include <string/string_list.h>
+
+#include "menu_generic.h"
+
 #include "../menu_driver.h"
+#include "../menu_entry.h"
 #include "../menu_input.h"
-#include "../menu.h"
+#include "../menu_setting.h"
+#include "../menu_display.h"
 #include "../../general.h"
 #include "../../config.def.h"
-#include <compat/posix_string.h>
 #include "../../performance.h"
 
-#include "../../settings.h"
 #include "../../screenshot.h"
 #include "../../gfx/drivers_font_renderer/bitmap.h"
 
-#include "shared.h"
 
 #if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_HLSL)
 #define HAVE_SHADER_MANAGER
@@ -63,30 +67,6 @@
 struct texture_image *menu_texture;
 static bool render_normal = true;
 static bool menu_texture_inited =false;
-
-static int rmenu_entry_iterate(unsigned action)
-{
-   const char *label         = NULL;
-   menu_file_list_cbs_t *cbs = NULL;
-   menu_handle_t *menu       = menu_driver_get_ptr();
-
-   if (!menu)
-      return -1;
-   
-   cbs = (menu_file_list_cbs_t*)menu_list_get_actiondata_at_offset(
-         menu->menu_list->selection_buf, menu->navigation.selection_ptr);
-
-   menu_list_get_last_stack(menu->menu_list, NULL, &label, NULL);
-
-   if (cbs && cbs->action_iterate)
-      return cbs->action_iterate(label, action);
-   
-   return -1;
-}
-
-static void rmenu_render_background(void)
-{
-}
 
 static void rmenu_render_messagebox(const char *message)
 {
@@ -140,18 +120,20 @@ end:
 
 static void rmenu_render(void)
 {
-   size_t begin, end, i, j;
+   bool msg_force;
+   uint64_t *frame_count;
+   size_t begin, end, i, j, selection;
    struct font_params font_parms;
-   char title[256], title_buf[256];
-   char title_msg[64];
-   const char *dir          = NULL;
-   const char *label        = NULL;
-   const char *core_name    = NULL;
-   const char *core_version = NULL;
-   unsigned menu_type       = 0;
-   menu_handle_t *menu      = menu_driver_get_ptr();
-   global_t    *global      = global_get_ptr();
-   runloop_t *runloop       = rarch_main_get_ptr();
+   char title[256]               = {0};
+   char title_buf[256]           = {0};
+   char title_msg[64]            = {0};
+   menu_handle_t *menu           = menu_driver_get_ptr();
+   size_t  entries_end           = menu_entries_get_end();
+
+   video_driver_ctl(RARCH_DISPLAY_CTL_GET_FRAME_COUNT, &frame_count);
+
+   if (!menu_navigation_ctl(MENU_NAVIGATION_CTL_GET_SELECTION, &selection))
+      return;
 
    if (!menu)
       return;
@@ -162,66 +144,49 @@ static void rmenu_render(void)
       return;
    }
 
-   if (menu->need_refresh && runloop->is_menu
-         && !menu->msg_force)
+   menu_display_ctl(MENU_DISPLAY_CTL_MSG_FORCE, &msg_force);
+
+   if (menu_entries_needs_refresh()
+         && menu_driver_ctl(RARCH_MENU_CTL_IS_ALIVE, NULL)
+         && !msg_force)
       return;
 
-   runloop->frames.video.current.menu.animation.is_active = false;
-   runloop->frames.video.current.menu.label.is_updated    = false;
-   runloop->frames.video.current.menu.framebuf.dirty      = false;
+   menu_display_ctl(MENU_DISPLAY_CTL_UNSET_FRAMEBUFFER_DIRTY_FLAG, NULL);
+   menu_animation_ctl(MENU_ANIMATION_CTL_CLEAR_ACTIVE, NULL);
 
-   if (!menu->menu_list->selection_buf)
-      return;
+   begin = (selection >= (ENTRIES_HEIGHT / 2)) ? 
+      (selection - (ENTRIES_HEIGHT / 2)) : 0;
+   end   = ((selection + ENTRIES_HEIGHT) <= entries_end)
+      ? selection + ENTRIES_HEIGHT : entries_end;
 
-   begin = (menu->navigation.selection_ptr >= (ENTRIES_HEIGHT / 2)) ? 
-      (menu->navigation.selection_ptr - (ENTRIES_HEIGHT / 2)) : 0;
-   end   = ((menu->navigation.selection_ptr + ENTRIES_HEIGHT) <= 
-         menu_list_get_size(menu->menu_list)) ?
-      menu->navigation.selection_ptr + ENTRIES_HEIGHT :
-      menu_list_get_size(menu->menu_list);
-
-   if (menu_list_get_size(menu->menu_list) <= ENTRIES_HEIGHT)
+   if (entries_end <= ENTRIES_HEIGHT)
       begin = 0;
 
    if (end - begin > ENTRIES_HEIGHT)
       end = begin + ENTRIES_HEIGHT;
    
-   rmenu_render_background();
+   menu_entries_get_title(title, sizeof(title));
 
-   menu_list_get_last_stack(menu->menu_list, &dir, &label, &menu_type);
+   menu_animation_ticker_str(title_buf, RMENU_TERM_WIDTH,
+         *frame_count / 15, title, true);
 
-   get_title(label, dir, menu_type, title, sizeof(title));
-
-   menu_animation_ticker_line(title_buf, RMENU_TERM_WIDTH,
-         runloop->frames.video.count / 15, title, true);
-
-   font_parms.x = POSITION_EDGE_MIN + POSITION_OFFSET;
-   font_parms.y = POSITION_EDGE_MIN + POSITION_RENDER_OFFSET
+   font_parms.x        = POSITION_EDGE_MIN + POSITION_OFFSET;
+   font_parms.y        = POSITION_EDGE_MIN + POSITION_RENDER_OFFSET
       - (POSITION_OFFSET*2);
-   font_parms.scale = FONT_SIZE_NORMAL;
-   font_parms.color = WHITE;
+   font_parms.scale    = FONT_SIZE_NORMAL;
+   font_parms.color    = WHITE;
+   font_parms.drop_mod = 0.0f;
+   font_parms.drop_x   = 0.0f;
+   font_parms.drop_y   = 0.0f;
 
    video_driver_set_osd_msg(title_buf, &font_parms, NULL);
-
-   core_name = global->menu.info.library_name;
-   if (!core_name)
-      core_name = global->system.info.library_name;
-   if (!core_name)
-      core_name = "No Core";
-
-   core_version = global->menu.info.library_version;
-   if (!core_version)
-      core_version = global->system.info.library_version;
-   if (!core_version)
-      core_version = "";
 
    font_parms.x = POSITION_EDGE_MIN + POSITION_OFFSET;
    font_parms.y = POSITION_EDGE_MAX - (POSITION_OFFSET*2);
    font_parms.scale = FONT_SIZE_NORMAL;
    font_parms.color = WHITE;
 
-   snprintf(title_msg, sizeof(title_msg), "%s - %s %s",
-         PACKAGE_VERSION, core_name, core_version);
+   menu_entries_get_core_title(title_msg, sizeof(title_msg));
 
    video_driver_set_osd_msg(title_msg, &font_parms, NULL);
 
@@ -229,37 +194,24 @@ static void rmenu_render(void)
 
    for (i = begin; i < end; i++, j++)
    {
-      char message[PATH_MAX_LENGTH], type_str[PATH_MAX_LENGTH],
-           entry_title_buf[PATH_MAX_LENGTH], type_str_buf[PATH_MAX_LENGTH],
-           path_buf[PATH_MAX_LENGTH];
-      const char *path = NULL, *entry_label = NULL;
-      unsigned type = 0, w = 0;
-      bool selected = false;
-      menu_file_list_cbs_t *cbs = NULL;
+      char entry_path[PATH_MAX_LENGTH]      = {0};
+      char entry_value[PATH_MAX_LENGTH]     = {0};
+      char message[PATH_MAX_LENGTH]         = {0};
+      char entry_title_buf[PATH_MAX_LENGTH] = {0};
+      char type_str_buf[PATH_MAX_LENGTH]    = {0};
+      unsigned entry_spacing                = menu_entry_get_spacing(i);
+      bool entry_selected                   = menu_entry_is_currently_selected(i);
 
-      menu_list_get_at_offset(menu->menu_list->selection_buf, i,
-            &path, &entry_label, &type);
+      menu_entry_get_value(i, entry_value, sizeof(entry_value));
+      menu_entry_get_path(i, entry_path, sizeof(entry_path));
 
-      cbs = (menu_file_list_cbs_t*)
-         menu_list_get_actiondata_at_offset(menu->menu_list->selection_buf,
-               i);
-
-      if (cbs && cbs->action_get_representation)
-         cbs->action_get_representation(menu->menu_list->selection_buf,
-               &w, type, i, label,
-               type_str, sizeof(type_str), 
-               entry_label, path,
-               path_buf, sizeof(path_buf));
-
-      selected = (i == menu->navigation.selection_ptr);
-
-      menu_animation_ticker_line(entry_title_buf, RMENU_TERM_WIDTH - (w + 1 + 2),
-            runloop->frames.video.count / 15, path, selected);
-      menu_animation_ticker_line(type_str_buf, w, runloop->frames.video.count / 15,
-            type_str, selected);
+      menu_animation_ticker_str(entry_title_buf, RMENU_TERM_WIDTH - (entry_spacing + 1 + 2),
+            *frame_count / 15, entry_path, entry_selected);
+      menu_animation_ticker_str(type_str_buf, entry_spacing,
+            *frame_count / 15, entry_value, entry_selected);
 
       snprintf(message, sizeof(message), "%c %s",
-            selected ? '>' : ' ', entry_title_buf);
+            entry_selected ? '>' : ' ', entry_title_buf);
 
       font_parms.x = POSITION_EDGE_MIN + POSITION_OFFSET;
       font_parms.y = POSITION_EDGE_MIN + POSITION_RENDER_OFFSET
@@ -277,7 +229,8 @@ static void rmenu_render(void)
 
 static void rmenu_set_texture(void)
 {
-   menu_handle_t *menu   = menu_driver_get_ptr();
+   unsigned fb_width, fb_height;
+   menu_handle_t      *menu   = menu_driver_get_ptr();
 
    if (!menu)
       return;
@@ -288,30 +241,33 @@ static void rmenu_set_texture(void)
    if (!menu_texture->pixels)
       return;
 
+   menu_display_ctl(MENU_DISPLAY_CTL_WIDTH,  &fb_width);
+   menu_display_ctl(MENU_DISPLAY_CTL_HEIGHT, &fb_height);
+
    video_driver_set_texture_frame(menu_texture->pixels, true,
-         menu->frame_buf.width, menu->frame_buf.height, 1.0f);
+         fb_width, fb_height, 1.0f);
    menu_texture_inited = true;
 }
 
-static void rmenu_wallpaper_set_defaults(char *menu_bg, size_t sizeof_menu_bg)
+static void rmenu_wallpaper_set_defaults(char *s, size_t len)
 {
    settings_t *settings = config_get_ptr();
 
-   fill_pathname_join(menu_bg, settings->assets_directory,
-         "rmenu", sizeof_menu_bg);
+   fill_pathname_join(s, settings->assets_directory,
+         "rmenu", len);
 #ifdef _XBOX1
-   fill_pathname_join(menu_bg, menu_bg, "sd", sizeof_menu_bg);
+   fill_pathname_join(s, s, "sd", len);
 #else
-   fill_pathname_join(menu_bg, menu_bg, "hd", sizeof_menu_bg);
+   fill_pathname_join(s, s, "hd", len);
 #endif
-   fill_pathname_join(menu_bg, menu_bg, "main_menu.png", sizeof_menu_bg);
+   fill_pathname_join(s, s, "main_menu.png", len);
 }
 
 static void rmenu_context_reset(void)
 {
-   char menu_bg[PATH_MAX_LENGTH];
-   menu_handle_t *menu  = menu_driver_get_ptr();
-   settings_t *settings = config_get_ptr();
+   char menu_bg[PATH_MAX_LENGTH] = {0};
+   menu_handle_t *menu           = menu_driver_get_ptr();
+   settings_t *settings          = config_get_ptr();
 
    if (!menu)
       return;
@@ -323,8 +279,9 @@ static void rmenu_context_reset(void)
 
    if (path_file_exists(menu_bg))
       texture_image_load(menu_texture, menu_bg);
-   menu->frame_buf.width = menu_texture->width;
-   menu->frame_buf.height = menu_texture->height;
+
+   menu_display_ctl(MENU_DISPLAY_CTL_SET_WIDTH,  &menu_texture->width);
+   menu_display_ctl(MENU_DISPLAY_CTL_SET_HEIGHT, &menu_texture->height);
 
    menu_texture_inited = false;
 }
@@ -356,9 +313,23 @@ static void rmenu_free(void *data)
 {
 }
 
+static int rmenu_environ(menu_environ_cb_t type, void *data)
+{
+   switch (type)
+   {
+      case 0:
+         break;
+      default:
+         return -1;
+   }
+
+   return 0;
+}
+
 menu_ctx_driver_t menu_ctx_rmenu = {
    rmenu_set_texture,
    rmenu_render_messagebox,
+   generic_menu_iterate,
    rmenu_render,
    NULL,
    rmenu_init,
@@ -374,12 +345,19 @@ menu_ctx_driver_t menu_ctx_rmenu = {
    NULL,
    NULL,
    NULL,
+   generic_menu_init_list,
    NULL,
    NULL,
    NULL,
    NULL,
    NULL,
-   rmenu_entry_iterate,
+   NULL,
+   NULL,
+   NULL,
+   NULL,
+   NULL,
    NULL,
    "rmenu",
+   rmenu_environ,
+   NULL,
 };

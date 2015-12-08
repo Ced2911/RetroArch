@@ -15,6 +15,7 @@
  */
 
 #include <xtl.h>
+
 #include "../font_driver.h"
 #include "../../general.h"
 
@@ -92,4 +93,5 @@ font_renderer_t d3d_xdk1_font = {
    NULL,                      /* get_glyph */
    NULL,                      /* bind_block */
    NULL,                      /* flush */
+   NULL                       /* get_message_width */
 };

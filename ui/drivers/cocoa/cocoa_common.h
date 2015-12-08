@@ -19,18 +19,21 @@
 
 #include <Foundation/Foundation.h>
 
-#include "../../core_info.h"
-#include "../../playlist.h"
-#include "../../settings.h"
-#include "../../menu/menu.h"
+#ifdef HAVE_MENU
+#include "../../menu/menu_setting.h"
+#include "../../menu/menu_driver.h"
+#endif
+
+#ifdef HAVE_CORELOCATION
+#include <CoreLocation/CoreLocation.h>
+#endif
 
 #if defined(HAVE_COCOATOUCH)
 #include <UIKit/UIKit.h>
 
-#include <CoreLocation/CoreLocation.h>
+#ifdef HAVE_AVFOUNDATION
 #import <AVFoundation/AVCaptureOutput.h>
-
-
+#endif
 
 /*********************************************/
 /* RAMenuBase                                */
@@ -40,14 +43,12 @@
 @interface RAMenuBase : UITableViewController
 @property (nonatomic) NSMutableArray* sections;
 @property (nonatomic) BOOL hidesHeaders;
+@property (nonatomic) RAMenuBase* last_menu;
+@property (nonatomic) UILabel *osdmessage;
 
 - (id)initWithStyle:(UITableViewStyle)style;
 - (id)itemForIndexPath:(NSIndexPath*)indexPath;
 
-@end
-
-@interface RAFoldersList : RAMenuBase
-- (id) initWithFilePath:(NSString*)path;
 @end
 
 typedef struct
@@ -66,23 +67,23 @@ extern apple_frontend_settings_t apple_frontend_settings;
 
 @property (nonatomic) UIWindow* window;
 @property (nonatomic) NSString* documentsDirectory;
-
+@property (nonatomic) RAMenuBase* mainmenu;
+@property (nonatomic) int menu_count;
+                      
 + (RetroArch_iOS*)get;
 
 - (void)showGameView;
 - (void)toggleUI;
 
 - (void)refreshSystemConfig;
+- (void)mainMenuPushPop: (bool)pushp;
+- (void)mainMenuRefresh;
 @end
 
 void get_ios_version(int *major, int *minor);
 
 #elif defined(HAVE_COCOA)
 #include <AppKit/AppKit.h>
-#ifdef HAVE_CORELOCATION
-#include <CoreLocation/CoreLocation.h>
-#endif
-
 
 @interface CocoaView : NSView
 #ifdef HAVE_CORELOCATION
@@ -99,7 +100,6 @@ void get_ios_version(int *major, int *minor);
 @interface RetroArch_OSX : NSObject
 {
    NSWindow* _window;
-   NSWindowController* _settingsWindow;
 }
 
 @property (nonatomic, retain) NSWindow IBOutlet* window;
@@ -109,8 +109,6 @@ void get_ios_version(int *major, int *minor);
 #endif
 
 extern void apple_display_alert(const char *message, const char *title);
-
-
 
 #define BOXSTRING(x) [NSString stringWithUTF8String:x]
 #define BOXINT(x)    [NSNumber numberWithInt:x]

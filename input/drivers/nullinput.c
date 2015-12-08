@@ -19,6 +19,7 @@
 
 static void *nullinput_input_init(void)
 {
+   RARCH_ERR("Using the null input driver. RetroArch will ignore you.");
    return (void*)-1;
 }
 
@@ -42,6 +43,14 @@ static int16_t nullinput_input_state(void *data,
 }
 
 static bool nullinput_input_key_pressed(void *data, int key)
+{
+   (void)data;
+   (void)key;
+
+   return false;
+}
+
+static bool nullinput_input_meta_key_pressed(void *data, int key)
 {
    (void)data;
    (void)key;
@@ -91,11 +100,16 @@ input_driver_t input_null = {
    nullinput_input_poll,
    nullinput_input_state,
    nullinput_input_key_pressed,
+   nullinput_input_meta_key_pressed,
    nullinput_input_free_input,
    nullinput_set_sensor_state,
    NULL,
    nullinput_get_capabilities,
    "null",
    nullinput_grab_mouse,
+   NULL,
    nullinput_set_rumble,
+   NULL,
+   NULL,
+   NULL,
 };

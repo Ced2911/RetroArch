@@ -17,6 +17,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include <boolean.h>
+
 #ifdef _XBOX
 #include <xtl.h>
 #endif
@@ -29,6 +31,7 @@
 
 typedef struct xdk_input
 {
+   bool blocked;
    const input_device_driver_t *joypad;
 } xdk_input_t;
 
@@ -80,7 +83,7 @@ static void *xdk_input_init(void)
    if (!xdk)
       return NULL;
 
-   xdk->joypad = input_joypad_init_driver(settings->input.joypad_driver);
+   xdk->joypad = input_joypad_init_driver(settings->input.joypad_driver, xdk);
 
    return xdk;
 }
@@ -89,10 +92,16 @@ static bool xdk_input_key_pressed(void *data, int key)
 {
    xdk_input_t *xdk     = (xdk_input_t*)data;
    settings_t *settings = config_get_ptr();
-   global_t *global     = global_get_ptr();
 
-   return (global->lifecycle_state & (1ULL << key)) ||
-      input_joypad_pressed(xdk->joypad, 0, settings->input.binds[0], key);
+   if (input_joypad_pressed(xdk->joypad, 0, settings->input.binds[0], key))
+      return true;
+
+   return false;
+}
+
+static bool xdk_input_meta_key_pressed(void *data, int key)
+{
+   return false;
 }
 
 static uint64_t xdk_input_get_capabilities(void *data)
@@ -151,17 +160,38 @@ static void xdk_input_grab_mouse(void *data, bool state)
    (void)state;
 }
 
+static bool xdk_keyboard_mapping_is_blocked(void *data)
+{
+   xdk_input_t *xdk = (xdk_input_t*)data;
+   if (!xdk)
+      return false;
+   return xdk->blocked;
+}
+
+static void xdk_keyboard_mapping_set_block(void *data, bool value)
+{
+   xdk_input_t *xdk = (xdk_input_t*)data;
+   if (!xdk)
+      return;
+   xdk->blocked = value;
+}
+
 input_driver_t input_xinput = {
    xdk_input_init,
    xdk_input_poll,
    xdk_input_state,
    xdk_input_key_pressed,
+   xdk_input_meta_key_pressed,
    xdk_input_free_input,
    NULL,
    NULL,
    xdk_input_get_capabilities,
    "xinput",
    xdk_input_grab_mouse,
+   NULL,
    xdk_input_set_rumble,
    xdk_input_get_joypad_driver,
+   NULL,
+   xdk_keyboard_mapping_is_blocked,
+   xdk_keyboard_mapping_set_block,
 };

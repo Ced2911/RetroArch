@@ -14,40 +14,29 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdint.h>
+#include <errno.h>
+#include <signal.h>
+#include <unistd.h>
+
+#include <sched.h>
+
+#include <VG/openvg.h>
+#include <bcm_host.h>
+
+#include <retro_inline.h>
+
 #include "../../driver.h"
 #include "../../runloop.h"
 #include "../video_context_driver.h"
-#include "../drivers/gl_common.h"
-#include "../video_monitor.h"
-#include <retro_inline.h>
+#include "../common/egl_common.h"
+#include "../common/gl_common.h"
+
+#include <EGL/eglext_brcm.h>
 
 #ifdef HAVE_CONFIG_H
 #include "../../config.h"
 #endif
-
-#include <errno.h>
-#include <signal.h>
-#include <stdint.h>
-#include <unistd.h>
-#include <sched.h>
-
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <EGL/eglext_brcm.h>
-#include <VG/openvg.h>
-#include <bcm_host.h>
-
-static bool g_use_hw_ctx;
-static EGLContext g_egl_hw_ctx;
-static EGLContext g_egl_ctx;
-static EGLSurface g_egl_surf;
-static EGLDisplay g_egl_dpy;
-static EGLConfig g_egl_config;
-
-static volatile sig_atomic_t g_quit;
-static bool g_inited;
-static unsigned g_interval;
-static enum gfx_ctx_api g_api;
 
 static unsigned g_fb_width;
 static unsigned g_fb_height;
@@ -72,26 +61,6 @@ static INLINE bool gfx_ctx_vc_egl_query_extension(const char *ext)
    return ret;
 }
 
-static void sighandler(int sig)
-{
-   (void)sig;
-   g_quit = 1;
-}
-
-static void gfx_ctx_vc_swap_interval(void *data, unsigned interval)
-{
-   (void)data;
-
-   /* Can be called before initialization.
-    * Some contexts require that swap interval 
-    * is known at startup time.
-    */
-   g_interval = interval;
-
-   if (g_egl_dpy)
-      eglSwapInterval(g_egl_dpy, interval);
-}
-
 static void gfx_ctx_vc_check_window(void *data, bool *quit,
       bool *resize, unsigned *width, unsigned *height, unsigned frame_count)
 {
@@ -101,13 +70,7 @@ static void gfx_ctx_vc_check_window(void *data, bool *quit,
    (void)height;
 
    *resize = false;
-   *quit   = g_quit;
-}
-
-static void gfx_ctx_vc_swap_buffers(void *data)
-{
-   (void)data;
-   eglSwapBuffers(g_egl_dpy, g_egl_surf);
+   *quit   = g_egl_quit;
 }
 
 static void gfx_ctx_vc_set_resize(void *data, unsigned width, unsigned height)
@@ -119,7 +82,8 @@ static void gfx_ctx_vc_set_resize(void *data, unsigned width, unsigned height)
 
 static void gfx_ctx_vc_update_window_title(void *data)
 {
-   char buf[128], buf_fps[128];
+   char buf[128]        = {0};
+   char buf_fps[128]    = {0};
    settings_t *settings = config_get_ptr();
 
    (void)data;
@@ -127,7 +91,7 @@ static void gfx_ctx_vc_update_window_title(void *data)
    video_monitor_get_fps(buf, sizeof(buf),
          buf_fps, sizeof(buf_fps));
    if (settings->fps_show)
-      msg_queue_push(buf_fps, 1, 1, false);
+      runloop_msg_queue_push(buf_fps, 1, 1, false);
 }
 
 static void gfx_ctx_vc_get_video_size(void *data,
@@ -169,7 +133,8 @@ static void gfx_ctx_vc_destroy(void *data);
 
 static bool gfx_ctx_vc_init(void *data)
 {
-   EGLint num_config;
+   VC_DISPMANX_ALPHA_T alpha;
+   EGLint n, major, minor;
    static EGL_DISPMANX_WINDOW_T nativewindow;
 
    DISPMANX_ELEMENT_HANDLE_T dispman_element;
@@ -196,8 +161,7 @@ static bool gfx_ctx_vc_init(void *data)
    };
    settings_t *settings = config_get_ptr();
 
-   RARCH_LOG("[VC/EGL]: Initializing...\n");
-   if (g_inited)
+   if (g_egl_inited)
    {
       RARCH_ERR("[VC/EGL]: Attempted to re-initialize driver.\n");
       return false;
@@ -205,34 +169,17 @@ static bool gfx_ctx_vc_init(void *data)
 
    bcm_host_init();
 
-   /* Get an EGL display connection. */
-   g_egl_dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-   if (!g_egl_dpy)
-      goto error;
-
-   /* Initialize the EGL display connection. */
-   if (!eglInitialize(g_egl_dpy, NULL, NULL))
-      goto error;
-
-   /* Get an appropriate EGL frame buffer configuration. */
-   if (!eglChooseConfig(g_egl_dpy, attribute_list, &g_egl_config, 1, &num_config))
-      goto error;
-
-   /* Create an EGL rendering context. */
-   g_egl_ctx = eglCreateContext(
-         g_egl_dpy, g_egl_config, EGL_NO_CONTEXT,
-         (g_api == GFX_CTX_OPENGL_ES_API) ? context_attributes : NULL);
-   if (!g_egl_ctx)
-      goto error;
-
-   if (g_use_hw_ctx)
+   if (!egl_init_context(EGL_DEFAULT_DISPLAY,
+            &major, &minor, &n, attribute_list))
    {
-      g_egl_hw_ctx = eglCreateContext(g_egl_dpy, g_egl_config, g_egl_ctx,
-            context_attributes);
-      RARCH_LOG("[VC/EGL]: Created shared context: %p.\n", (void*)g_egl_hw_ctx);
+      egl_report_error();
+      goto error;
+   }
 
-      if (g_egl_hw_ctx == EGL_NO_CONTEXT)
-         goto error;
+   if (!egl_create_context((g_egl_api == GFX_CTX_OPENGL_ES_API) ? context_attributes : NULL))
+   {
+      egl_report_error();
+      goto error;
    }
 
    /* Create an EGL window surface. */
@@ -275,7 +222,6 @@ static bool gfx_ctx_vc_init(void *data)
    vc_dispmanx_display_get_info(dispman_display, &dispman_modeinfo);
    dispman_update = vc_dispmanx_update_start(0);
 
-   VC_DISPMANX_ALPHA_T alpha;
    alpha.flags = DISPMANX_FLAGS_ALPHA_FIXED_ALL_PIXELS;
    alpha.opacity = 255;
    alpha.mask = 0;
@@ -313,12 +259,7 @@ static bool gfx_ctx_vc_init(void *data)
    }
    vc_dispmanx_update_submit_sync(dispman_update);
 
-   g_egl_surf = eglCreateWindowSurface(g_egl_dpy, g_egl_config, &nativewindow, NULL);
-   if (!g_egl_surf)
-      goto error;
-
-   /* Connect the context to the surface. */
-   if (!eglMakeCurrent(g_egl_dpy, g_egl_surf, g_egl_surf, g_egl_ctx))
+   if (!egl_create_surface(&nativewindow))
       goto error;
 
    return true;
@@ -332,20 +273,13 @@ static bool gfx_ctx_vc_set_video_mode(void *data,
       unsigned width, unsigned height,
       bool fullscreen)
 {
-   struct sigaction sa = {{0}};
-
-   if (g_inited)
+   if (g_egl_inited)
       return false;
 
-   sa.sa_handler = sighandler;
-   sa.sa_flags   = SA_RESTART;
-   sigemptyset(&sa.sa_mask);
-   sigaction(SIGINT, &sa, NULL);
-   sigaction(SIGTERM, &sa, NULL);
+   egl_install_sighandlers();
+   egl_set_swap_interval(data, g_interval);
 
-   gfx_ctx_vc_swap_interval(data, g_interval);
-
-   g_inited = true;
+   g_egl_inited = true;
 
    return true;
 }
@@ -357,7 +291,7 @@ static bool gfx_ctx_vc_bind_api(void *data,
    (void)major;
    (void)minor;
 
-   g_api = api;
+   g_egl_api = api;
 
    switch (api)
    {
@@ -402,7 +336,7 @@ static void gfx_ctx_vc_destroy(void *data)
 
       if (g_egl_ctx)
       {
-         gfx_ctx_vc_bind_api(data, g_api, 0, 0);
+         gfx_ctx_vc_bind_api(data, g_egl_api, 0, 0);
          eglMakeCurrent(g_egl_dpy,
                EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
          eglDestroyContext(g_egl_dpy, g_egl_ctx);
@@ -421,7 +355,7 @@ static void gfx_ctx_vc_destroy(void *data)
 
       if (g_egl_surf)
       {
-         gfx_ctx_vc_bind_api(data, g_api, 0, 0);
+         gfx_ctx_vc_bind_api(data, g_egl_api, 0, 0);
          eglDestroySurface(g_egl_dpy, g_egl_surf);
       }
 
@@ -434,7 +368,7 @@ static void gfx_ctx_vc_destroy(void *data)
       eglBindAPI(EGL_OPENVG_API);
       eglMakeCurrent(g_egl_dpy,
             EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-      gfx_ctx_vc_bind_api(data, g_api, 0, 0);
+      gfx_ctx_vc_bind_api(data, g_egl_api, 0, 0);
       eglMakeCurrent(g_egl_dpy,
             EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
       eglTerminate(g_egl_dpy);
@@ -447,7 +381,7 @@ static void gfx_ctx_vc_destroy(void *data)
    g_pbuff_surf   = NULL;
    g_egl_dpy      = NULL;
    g_egl_config   = 0;
-   g_inited       = false;
+   g_egl_inited   = false;
 
    for (i = 0; i < MAX_EGLIMAGE_TEXTURES; i++)
    {
@@ -467,7 +401,7 @@ static void gfx_ctx_vc_input_driver(void *data,
 static bool gfx_ctx_vc_has_focus(void *data)
 {
    (void)data;
-   return g_inited;
+   return g_egl_inited;
 }
 
 static bool gfx_ctx_vc_suppress_screensaver(void *data, bool enable)
@@ -483,11 +417,6 @@ static bool gfx_ctx_vc_has_windowed(void *data)
    return false;
 }
 
-static gfx_ctx_proc_t gfx_ctx_vc_get_proc_address(const char *symbol)
-{
-   return eglGetProcAddress(symbol);
-}
-
 static float gfx_ctx_vc_translate_aspect(void *data,
       unsigned width, unsigned height)
 {
@@ -496,8 +425,7 @@ static float gfx_ctx_vc_translate_aspect(void *data,
    /* Check for SD televisions: they should always be 4:3. */
    if ((width == 640 || width == 720) && (height == 480 || height == 576))
       return 4.0f / 3.0f;
-   else
-      return (float)width / height;
+   return (float)width / height;
 }
 
 static bool gfx_ctx_vc_image_buffer_init(void *data,
@@ -512,13 +440,13 @@ static bool gfx_ctx_vc_image_buffer_init(void *data,
    };
 
    /* Don't bother, we just use VGImages for our EGLImage anyway. */
-   if (g_api == GFX_CTX_OPENVG_API)
+   if (g_egl_api == GFX_CTX_OPENVG_API)
       return false;
 
    peglCreateImageKHR = (PFNEGLCREATEIMAGEKHRPROC)
-      gfx_ctx_vc_get_proc_address("eglCreateImageKHR");
+      egl_get_proc_address("eglCreateImageKHR");
    peglDestroyImageKHR = (PFNEGLDESTROYIMAGEKHRPROC)
-      gfx_ctx_vc_get_proc_address("eglDestroyImageKHR");
+      egl_get_proc_address("eglDestroyImageKHR");
 
    if (!peglCreateImageKHR || !peglDestroyImageKHR 
          || !gfx_ctx_vc_egl_query_extension("KHR_image"))
@@ -549,7 +477,7 @@ static bool gfx_ctx_vc_image_buffer_init(void *data,
       goto fail;
    }
 
-   gfx_ctx_vc_bind_api(data, g_api, 0, 0);
+   gfx_ctx_vc_bind_api(data, g_egl_api, 0, 0);
    eglMakeCurrent(g_egl_dpy, g_egl_surf, g_egl_surf, g_egl_ctx);
 
    g_smooth = video->smooth;
@@ -568,7 +496,7 @@ fail:
       g_pbuff_surf = EGL_NO_CONTEXT;
    }
 
-   gfx_ctx_vc_bind_api(data, g_api, 0, 0);
+   gfx_ctx_vc_bind_api(data, g_egl_api, 0, 0);
    eglMakeCurrent(g_egl_dpy, g_egl_surf, g_egl_surf, g_egl_ctx);
 
    return false;
@@ -580,10 +508,7 @@ static bool gfx_ctx_vc_image_buffer_write(void *data, const void *frame, unsigne
    bool ret = false;
 
    if (index >= MAX_EGLIMAGE_TEXTURES)
-   {
-      *image_handle = NULL;
-      return false;
-   }
+      goto error;
 
    eglBindAPI(EGL_OPENVG_API);
    eglMakeCurrent(g_egl_dpy, g_pbuff_surf, g_pbuff_surf, g_eglimage_ctx);
@@ -614,32 +539,21 @@ static bool gfx_ctx_vc_image_buffer_write(void *data, const void *frame, unsigne
          height);
    *image_handle = eglBuffer[index];
 
-   gfx_ctx_vc_bind_api(data, g_api, 0, 0);
+   gfx_ctx_vc_bind_api(data, g_egl_api, 0, 0);
    eglMakeCurrent(g_egl_dpy, g_egl_surf, g_egl_surf, g_egl_ctx);
 
    return ret;
-}
 
-static void gfx_ctx_vc_bind_hw_render(void *data, bool enable)
-{
-   (void)data;
-
-   g_use_hw_ctx = enable;
-
-   if (!g_egl_dpy)
-      return;
-   if (!g_egl_surf)
-      return;
-
-   eglMakeCurrent(g_egl_dpy, g_egl_surf,
-         g_egl_surf, enable ? g_egl_hw_ctx : g_egl_ctx);
+error:
+   *image_handle = NULL;
+   return false;
 }
 
 const gfx_ctx_driver_t gfx_ctx_videocore = {
    gfx_ctx_vc_init,
    gfx_ctx_vc_destroy,
    gfx_ctx_vc_bind_api,
-   gfx_ctx_vc_swap_interval,
+   egl_set_swap_interval,
    gfx_ctx_vc_set_video_mode,
    gfx_ctx_vc_get_video_size,
    NULL, /* get_video_output_size */
@@ -653,12 +567,12 @@ const gfx_ctx_driver_t gfx_ctx_videocore = {
    gfx_ctx_vc_has_focus,
    gfx_ctx_vc_suppress_screensaver,
    gfx_ctx_vc_has_windowed,
-   gfx_ctx_vc_swap_buffers,
+   egl_swap_buffers,
    gfx_ctx_vc_input_driver,
-   gfx_ctx_vc_get_proc_address,
+   egl_get_proc_address,
    gfx_ctx_vc_image_buffer_init,
    gfx_ctx_vc_image_buffer_write,
    NULL,
    "videocore",
-   gfx_ctx_vc_bind_hw_render,
+   egl_bind_hw_render,
 };

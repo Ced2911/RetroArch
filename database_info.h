@@ -21,7 +21,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <boolean.h>
+#include <file/file_extract.h>
 #include "libretro-db/libretrodb.h"
+#include "playlist.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,13 +33,19 @@ enum database_status
 {
    DATABASE_STATUS_NONE = 0,
    DATABASE_STATUS_ITERATE,
-   DATABASE_STATUS_FREE,
+   DATABASE_STATUS_ITERATE_BEGIN,
+   DATABASE_STATUS_ITERATE_START,
+   DATABASE_STATUS_ITERATE_NEXT,
+   DATABASE_STATUS_FREE
 };
 
 enum database_type
 {
    DATABASE_TYPE_NONE = 0,
-   DATABASE_TYPE_RDL_WRITE,
+   DATABASE_TYPE_ITERATE,
+   DATABASE_TYPE_ITERATE_ZIP,
+   DATABASE_TYPE_SERIAL_LOOKUP,
+   DATABASE_TYPE_CRC_LOOKUP
 };
 
 typedef struct
@@ -46,14 +54,19 @@ typedef struct
    enum database_type type;
    size_t list_ptr;
    struct string_list *list;
+#ifdef HAVE_ZLIB
+   zlib_transfer_t state;
+#endif
 } database_info_handle_t;
 
 typedef struct
 {
    char *name;
+   char *rom_name;
+   char *serial;
    char *description;
    char *publisher;
-   char *developer;
+   struct string_list *developer;
    char *origin;
    char *franchise;
    char *edge_magazine_review;
@@ -63,9 +76,10 @@ typedef struct
    char *pegi_rating;
    char *cero_rating;
    char *enhancement_hw;
-   char *crc32;
+   uint32_t crc32;
    char *sha1;
    char *md5;
+   unsigned size;
    unsigned famitsu_magazine_rating;
    unsigned edge_magazine_rating;
    unsigned edge_magazine_issue;
@@ -88,15 +102,22 @@ database_info_list_t *database_info_list_new(const char *rdb_path,
 
 void database_info_list_free(database_info_list_t *list);
 
-int database_open_cursor(libretrodb_t *db,
-      libretrodb_cursor_t *cur, const char *query);
-
-database_info_handle_t *database_info_init(const char *dir,
+database_info_handle_t *database_info_dir_init(const char *dir,
       enum database_type type);
 
-void database_info_free(database_info_handle_t *dbl);
+database_info_handle_t *database_info_file_init(const char *path,
+      enum database_type type);
 
-int database_info_iterate(database_info_handle_t *dbl);
+void database_info_free(database_info_handle_t *handle);
+
+int database_info_build_query(
+      char *query, size_t len, const char *label, const char *path);
+
+/*
+ * NOTE: Allocates memory, it is the caller's responsibility to free the
+ * memory after it is no longer required.
+ */
+char *bin_to_hex_alloc(const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

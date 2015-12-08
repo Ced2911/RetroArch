@@ -14,9 +14,11 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../../driver.h"
-#include "../../runloop.h"
-#include "../../ps3/sdk_defines.h"
+#include <stdint.h>
+
+#ifndef __PSL1GHT__
+#include <sys/spu_initialize.h>
+#endif
 
 #ifdef HAVE_LIBDBGFONT
 #ifndef __PSL1GHT__
@@ -24,51 +26,38 @@
 #endif
 #endif
 
-#include "../video_monitor.h"
-
-#ifndef __PSL1GHT__
-#include <sys/spu_initialize.h>
-#endif
-
-#include <stdint.h>
+#include "../../driver.h"
+#include "../../runloop.h"
+#include "../../defines/ps3_defines.h"
+#include "../common/gl_common.h"
+#include "../video_context_driver.h"
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-
-#include "../drivers/gl_common.h"
-
-#include "../video_context_driver.h"
 
 typedef struct gfx_ctx_ps3_data
 {
 #if defined(HAVE_PSGL)
    PSGLdevice* gl_device;
    PSGLcontext* gl_context;
+#else
+   void *empty;
 #endif
 } gfx_ctx_ps3_data_t;
 
-static unsigned gfx_ctx_ps3_get_resolution_width(unsigned resolution_id)
+static void gfx_ctx_ps3_get_resolution(unsigned idx, unsigned *width, unsigned *height)
 {
    CellVideoOutResolution resolution;
-   cellVideoOutGetResolution(resolution_id, &resolution);
+   cellVideoOutGetResolution(idx, &resolution);
 
-   return resolution.width;
-}
-
-static unsigned gfx_ctx_ps3_get_resolution_height(unsigned resolution_id)
-{
-   CellVideoOutResolution resolution;
-   cellVideoOutGetResolution(resolution_id, &resolution);
-
-   return resolution.height;
+   *width  = resolution.width;
+   *height = resolution.height;
 }
 
 static float gfx_ctx_ps3_get_aspect_ratio(void *data)
 {
    CellVideoOutState videoState;
-
-   (void)data;
 
    cellVideoOutGetState(CELL_VIDEO_OUT_PRIMARY, 0, &videoState);
 
@@ -77,7 +66,7 @@ static float gfx_ctx_ps3_get_aspect_ratio(void *data)
       case CELL_VIDEO_OUT_ASPECT_4_3:
          return 4.0f/3.0f;
       case CELL_VIDEO_OUT_ASPECT_16_9:
-         return 16.0f/9.0f;
+         break;
    }
 
    return 16.0f/9.0f;
@@ -86,9 +75,6 @@ static float gfx_ctx_ps3_get_aspect_ratio(void *data)
 static void gfx_ctx_ps3_get_available_resolutions(void)
 {
    unsigned i;
-   bool defaultresolution;
-   uint32_t resolution_count;
-   uint16_t num_videomodes;
    uint32_t videomode[] = {
       CELL_VIDEO_OUT_RESOLUTION_480,
       CELL_VIDEO_OUT_RESOLUTION_576,
@@ -99,16 +85,13 @@ static void gfx_ctx_ps3_get_available_resolutions(void)
       CELL_VIDEO_OUT_RESOLUTION_1600x1080,
       CELL_VIDEO_OUT_RESOLUTION_1080
    };
-   global_t *global = global_get_ptr();
+   uint32_t resolution_count = 0;
+   bool defaultresolution    = true;
+   uint16_t num_videomodes   = sizeof(videomode) / sizeof(uint32_t);
+   global_t       *global    = global_get_ptr();
 
    if (global->console.screen.resolutions.check)
       return;
-
-   defaultresolution = true;
-
-   num_videomodes = sizeof(videomode) / sizeof(uint32_t);
-
-   resolution_count = 0;
 
    for (i = 0; i < num_videomodes; i++)
    {
@@ -117,8 +100,9 @@ static void gfx_ctx_ps3_get_available_resolutions(void)
          resolution_count++;
    }
 
-   global->console.screen.resolutions.list = malloc(resolution_count * sizeof(uint32_t));
    global->console.screen.resolutions.count = 0;
+   global->console.screen.resolutions.list  = 
+      malloc(resolution_count * sizeof(uint32_t));
 
    for (i = 0; i < num_videomodes; i++)
    {
@@ -131,7 +115,8 @@ static void gfx_ctx_ps3_get_available_resolutions(void)
          if (global->console.screen.resolutions.current.id == videomode[i])
          {
             defaultresolution = false;
-            global->console.screen.resolutions.current.idx = global->console.screen.resolutions.count-1;
+            global->console.screen.resolutions.current.idx = 
+               global->console.screen.resolutions.count-1;
          }
       }
    }
@@ -146,17 +131,7 @@ static void gfx_ctx_ps3_get_available_resolutions(void)
 
 static void gfx_ctx_ps3_set_swap_interval(void *data, unsigned interval)
 {
-   driver_t *driver = driver_get_ptr();
-   gfx_ctx_ps3_data_t *ps3 = (gfx_ctx_ps3_data_t*)driver->video_context_data;
-
-   (void)data;
-
 #if defined(HAVE_PSGL)
-   if (!ps3)
-      return;
-   if (!ps3->gl_context)
-      return;
-
    if (interval)
       glEnable(GL_VSYNC_SCE);
    else
@@ -217,7 +192,8 @@ static void gfx_ctx_ps3_set_resize(void *data,
 
 static void gfx_ctx_ps3_update_window_title(void *data)
 {
-   char buf[128], buf_fps[128];
+   char buf[128]        = {0};
+   char buf_fps[128]    = {0};
    settings_t *settings = config_get_ptr();
 
    (void)data;
@@ -225,14 +201,14 @@ static void gfx_ctx_ps3_update_window_title(void *data)
    video_monitor_get_fps(buf, sizeof(buf),
          buf_fps, sizeof(buf_fps));
    if (settings->fps_show)
-      rarch_main_msg_queue_push(buf_fps, 1, 1, false);
+      runloop_msg_queue_push(buf_fps, 1, 1, false);
 }
 
 static void gfx_ctx_ps3_get_video_size(void *data,
       unsigned *width, unsigned *height)
 {
-   driver_t *driver = driver_get_ptr();
-   gfx_ctx_ps3_data_t *ps3 = (gfx_ctx_ps3_data_t*)driver->video_context_data;
+   gfx_ctx_ps3_data_t *ps3 = (gfx_ctx_ps3_data_t*)
+      gfx_ctx_data_get_ptr();
 
    (void)data;
 
@@ -244,7 +220,10 @@ static void gfx_ctx_ps3_get_video_size(void *data,
 
 static bool gfx_ctx_ps3_init(void *data)
 {
-   driver_t *driver = driver_get_ptr();
+#ifdef HAVE_PSGL
+   PSGLdeviceParameters params;
+   PSGLinitOptions options;
+#endif
    global_t *global = global_get_ptr();
    gfx_ctx_ps3_data_t *ps3 = (gfx_ctx_ps3_data_t*)
       calloc(1, sizeof(gfx_ctx_ps3_data_t));
@@ -256,30 +235,30 @@ static bool gfx_ctx_ps3_init(void *data)
       return false;
 
 #if defined(HAVE_PSGL)
-   PSGLdeviceParameters params;
-   PSGLinitOptions options = {
-      .enable = PSGL_INIT_MAX_SPUS | PSGL_INIT_INITIALIZE_SPUS,
-      .maxSPUs = 1,
-      .initializeSPUs = GL_FALSE,
-   };
+   options.enable         = PSGL_INIT_MAX_SPUS | PSGL_INIT_INITIALIZE_SPUS;
+   options.maxSPUs        = 1;
+   options.initializeSPUs = GL_FALSE;
 
    /* Initialize 6 SPUs but reserve 1 SPU as a raw SPU for PSGL. */
    sys_spu_initialize(6, 1);
    psglInit(&options);
 
-
-   params.enable = PSGL_DEVICE_PARAMETERS_COLOR_FORMAT |
+   params.enable            = 
+      PSGL_DEVICE_PARAMETERS_COLOR_FORMAT |
       PSGL_DEVICE_PARAMETERS_DEPTH_FORMAT |
       PSGL_DEVICE_PARAMETERS_MULTISAMPLING_MODE;
-   params.colorFormat = GL_ARGB_SCE;
-   params.depthFormat = GL_NONE;
+   params.colorFormat       = GL_ARGB_SCE;
+   params.depthFormat       = GL_NONE;
    params.multisamplingMode = GL_MULTISAMPLING_NONE_SCE;
 
    if (global->console.screen.resolutions.current.id)
    {
       params.enable |= PSGL_DEVICE_PARAMETERS_WIDTH_HEIGHT;
-      params.width = gfx_ctx_ps3_get_resolution_width(global->console.screen.resolutions.current.id);
-      params.height = gfx_ctx_ps3_get_resolution_height(global->console.screen.resolutions.current.id);
+
+      gfx_ctx_ps3_get_resolution(
+            global->console.screen.resolutions.current.id,
+            &params.width, &params.height);
+
       global->console.screen.pal_enable = false;
 
       if (params.width == 720 && params.height == 576)
@@ -312,7 +291,7 @@ static bool gfx_ctx_ps3_init(void *data)
 
    gfx_ctx_ps3_get_available_resolutions();
 
-   driver->video_context_data = ps3;
+   gfx_ctx_data_set(ps3);
 
    return true;
 }
@@ -321,7 +300,14 @@ static bool gfx_ctx_ps3_set_video_mode(void *data,
       unsigned width, unsigned height,
       bool fullscreen)
 {
-   (void)data;
+   global_t *global = global_get_ptr();
+
+   if (!global)
+      return false;
+
+   global->console.screen.resolutions.width  = width;
+   global->console.screen.resolutions.height = height;
+
    return true;
 }
 
@@ -340,8 +326,8 @@ static void gfx_ctx_ps3_destroy_resources(gfx_ctx_ps3_data_t *ps3)
 
 static void gfx_ctx_ps3_destroy(void *data)
 {
-   driver_t *driver = driver_get_ptr();
-   gfx_ctx_ps3_data_t *ps3 = (gfx_ctx_ps3_data_t*)driver->video_context_data;
+   gfx_ctx_ps3_data_t *ps3 = (gfx_ctx_ps3_data_t*)
+      gfx_ctx_data_get_ptr();
 
    (void)data;
 
@@ -350,19 +336,13 @@ static void gfx_ctx_ps3_destroy(void *data)
 
    gfx_ctx_ps3_destroy_resources(ps3);
 
-   if (driver->video_context_data)
-      free(driver->video_context_data);
-   driver->video_context_data = NULL;
+   gfx_ctx_free_data();
 }
 
 static void gfx_ctx_ps3_input_driver(void *data,
       const input_driver_t **input, void **input_data)
 {
-   void *ps3input = NULL;
-
-   (void)data;
-
-   ps3input = input_ps3.init();
+   void *ps3input = input_ps3.init();
 
    *input = ps3input ? &input_ps3 : NULL;
    *input_data = ps3input;
@@ -378,6 +358,61 @@ static bool gfx_ctx_ps3_bind_api(void *data,
    return api == GFX_CTX_OPENGL_API || GFX_CTX_OPENGL_ES_API;
 }
 
+static void gfx_ctx_ps3_get_video_output_size(void *data, unsigned *width, unsigned *height)
+{
+   global_t *global = global_get_ptr();
+
+   if (!global)
+      return;
+
+   gfx_ctx_ps3_get_resolution(global->console.screen.resolutions.current.id,
+         width, height);
+
+   if (*width == 720 && *height == 576)
+   {
+      if (global->console.screen.pal_enable)
+         global->console.screen.pal60_enable = true;
+   }
+   else
+   {
+      global->console.screen.pal_enable = false;
+      global->console.screen.pal60_enable = false;
+   }
+}
+
+static void gfx_ctx_ps3_get_video_output_prev(void *data)
+{
+   global_t *global = global_get_ptr();
+
+   if (!global)
+      return;
+
+   if (global->console.screen.resolutions.current.idx)
+   {
+      global->console.screen.resolutions.current.idx--;
+      global->console.screen.resolutions.current.id =
+         global->console.screen.resolutions.list
+         [global->console.screen.resolutions.current.idx];
+   }
+}
+
+static void gfx_ctx_ps3_get_video_output_next(void *data)
+{
+   global_t *global = global_get_ptr();
+
+   if (!global)
+      return;
+
+   if (global->console.screen.resolutions.current.idx + 1 <
+         global->console.screen.resolutions.count)
+   {
+      global->console.screen.resolutions.current.idx++;
+      global->console.screen.resolutions.current.id =
+         global->console.screen.resolutions.list
+         [global->console.screen.resolutions.current.idx];
+   }
+}
+
 const gfx_ctx_driver_t gfx_ctx_ps3 = {
    gfx_ctx_ps3_init,
    gfx_ctx_ps3_destroy,
@@ -385,9 +420,9 @@ const gfx_ctx_driver_t gfx_ctx_ps3 = {
    gfx_ctx_ps3_set_swap_interval,
    gfx_ctx_ps3_set_video_mode,
    gfx_ctx_ps3_get_video_size,
-   NULL, /* get_video_output_size */
-   NULL, /* get_video_output_prev */
-   NULL, /* get_video_output_next */
+   gfx_ctx_ps3_get_video_output_size,
+   gfx_ctx_ps3_get_video_output_prev,
+   gfx_ctx_ps3_get_video_output_next,
    NULL, /* get_metrics */
    NULL,
    gfx_ctx_ps3_update_window_title,

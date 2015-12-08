@@ -3,9 +3,8 @@
  *  Copyright (C) 2011-2015 - Daniel De Matteis
  *  Copyright (C) 2012-2015 - Michael Lelli
  *  Copyright (C) 2013-2014 - Steven Crowe
- * 
- *  RetroArch is free software: you can redistribute it and/or modify it under the terms
- *  of the GNU General Public License as published by the Free Software Found-
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms *  of the GNU General Public License as published by the Free Software Found-
  *  ation, either version 3 of the License, or (at your option) any later version.
  *
  *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
@@ -16,58 +15,26 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "../drivers_keyboard/keyboard_event_android.h"
+
 static const char *android_joypad_name(unsigned pad)
 {
    settings_t *settings = config_get_ptr();
    return settings ? settings->input.device_names[pad] : NULL;
 }
 
-static bool android_joypad_init(void)
+static bool android_joypad_init(void *data)
 {
-   unsigned autoconf_pad;
-   settings_t *settings       = config_get_ptr();
-   autoconfig_params_t params = {{0}};
-
-   for (autoconf_pad = 0; autoconf_pad < MAX_USERS; autoconf_pad++)
-   {
-      strlcpy(settings->input.device_names[autoconf_pad],
-            android_joypad_name(autoconf_pad),
-            sizeof(settings->input.device_names[autoconf_pad]));
-
-      /* TODO - implement VID/PID? */
-      params.idx = autoconf_pad;
-      strlcpy(params.name, android_joypad_name(autoconf_pad), sizeof(params.name));
-      strlcpy(params.driver, android_joypad.ident, sizeof(params.driver));
-      input_config_autoconfigure_joypad(&params);
-   }
-
-   engine_handle_dpad = engine_handle_dpad_default;
-   if ((dlopen("/system/lib/libandroid.so", RTLD_LOCAL | RTLD_LAZY)) == 0)
-   {
-      RARCH_WARN("Unable to open libandroid.so\n");
-      return true;
-   }
-
-   if ((p_AMotionEvent_getAxisValue = dlsym(RTLD_DEFAULT,
-               "AMotionEvent_getAxisValue")))
-   {
-      RARCH_LOG("Set engine_handle_dpad to 'Get Axis Value' (for reading extra analog sticks)");
-      engine_handle_dpad = engine_handle_dpad_getaxisvalue;
-   }
-
    return true;
 }
 
 static bool android_joypad_button(unsigned port, uint16_t joykey)
 {
-   uint8_t *buf             = NULL;
-   driver_t *driver         = driver_get_ptr();
-   android_input_t *android = (android_input_t*)driver->input_data;
+   uint8_t *buf             = android_keyboard_state_get(port);
+   struct android_app *android_app = (struct android_app*)g_android;
 
-   if (!android || port >= MAX_PADS)
+   if (port >= MAX_PADS)
       return false;
-
-   buf = android->pad_state[port];
 
    if (GET_HAT_DIR(joykey))
    {
@@ -78,13 +45,13 @@ static bool android_joypad_button(unsigned port, uint16_t joykey)
       switch (GET_HAT_DIR(joykey))
       {
          case HAT_LEFT_MASK:
-            return android->hat_state[port][0] == -1;
+            return android_app->hat_state[port][0] == -1;
          case HAT_RIGHT_MASK:
-            return android->hat_state[port][0] ==  1;
+            return android_app->hat_state[port][0] ==  1;
          case HAT_UP_MASK:
-            return android->hat_state[port][1] == -1;
+            return android_app->hat_state[port][1] == -1;
          case HAT_DOWN_MASK:
-            return android->hat_state[port][1] ==  1;
+            return android_app->hat_state[port][1] ==  1;
          default:
             return false;
       }
@@ -96,32 +63,23 @@ static bool android_joypad_button(unsigned port, uint16_t joykey)
 static int16_t android_joypad_axis(unsigned port, uint32_t joyaxis)
 {
    int val                  = 0;
-   int axis                 = -1;
-   bool is_neg              = false;
-   bool is_pos              = false;
-   driver_t *driver         = driver_get_ptr();
-   android_input_t *android = (android_input_t*)driver->input_data;
+   struct android_app *android_app = (struct android_app*)g_android;
 
-   if (!android || joyaxis == AXIS_NONE || port >= MAX_PADS)
+   if (joyaxis == AXIS_NONE)
       return 0;
 
    if (AXIS_NEG_GET(joyaxis) < MAX_AXIS)
    {
-      axis = AXIS_NEG_GET(joyaxis);
-      is_neg = true;
+      val = android_app->analog_state[port][AXIS_NEG_GET(joyaxis)];
+      if (val > 0)
+         val = 0;
    }
    else if (AXIS_POS_GET(joyaxis) < MAX_AXIS)
    {
-      axis = AXIS_POS_GET(joyaxis);
-      is_pos = true;
+      val = android_app->analog_state[port][AXIS_POS_GET(joyaxis)];
+      if (val < 0)
+         val = 0;
    }
-
-   val = android->analog_state[port][axis];
-
-   if (is_neg && val > 0)
-      val = 0;
-   else if (is_pos && val < 0)
-      val = 0;
 
    return val;
 }
@@ -132,14 +90,22 @@ static void android_joypad_poll(void)
 
 static bool android_joypad_query_pad(unsigned pad)
 {
-   driver_t *driver         = driver_get_ptr();
-   android_input_t *android = (android_input_t*)driver->input_data;
-   return (pad < MAX_USERS && pad < android->pads_connected);
+   return (pad < MAX_USERS);
 }
 
 
 static void android_joypad_destroy(void)
 {
+   unsigned i, j;
+   struct android_app *android_app = (struct android_app*)g_android;
+
+   for (i = 0; i < MAX_PADS; i++)
+   {
+      for (j = 0; j < 2; j++)
+         android_app->hat_state[i][j]    = 0;
+      for (j = 0; j < MAX_AXIS; j++)
+         android_app->analog_state[i][j] = 0;
+   }
 }
 
 input_device_driver_t android_joypad = {

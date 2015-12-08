@@ -17,16 +17,19 @@
 /* BPS/UPS/IPS implementation from bSNES (nall::).
  * Modified for RetroArch. */
 
-#include <file/file_path.h>
-#include <boolean.h>
-#include <compat/msvc.h>
 #include <stdint.h>
 #include <string.h>
+
+#include <boolean.h>
+
+#include <compat/msvc.h>
+#include <file/file_path.h>
+#include <file/file_extract.h>
+
 #include "patch.h"
 #include "file_ops.h"
-#include <file/file_extract.h>
 #include "general.h"
-#include "retroarch_logger.h"
+#include "verbosity.h"
 
 enum bps_mode
 {
@@ -145,9 +148,11 @@ patch_error_t bps_apply_patch(
          case SOURCE_COPY:
          case TARGET_COPY:
          {
-            int offset = bps_decode(&bps);
+            int    offset = bps_decode(&bps);
             bool negative = offset & 1;
+
             offset >>= 1;
+
             if (negative)
                offset = -offset;
 
@@ -254,7 +259,8 @@ static uint64_t ups_decode(struct ups_data *data)
    while (true) 
    {
       uint8_t x = ups_patch_read(data);
-      offset += (x & 0x7f) * shift;
+      offset   += (x & 0x7f) * shift;
+
       if (x & 0x80) 
          break;
       shift <<= 7;
@@ -463,7 +469,6 @@ static bool apply_patch_content(uint8_t **buf,
    if (patch_size < 0)
       return false;
 
-
    if (!path_file_exists(patch_path))
       return false;
 
@@ -513,42 +518,42 @@ error:
 static bool try_bps_patch(uint8_t **buf, ssize_t *size)
 {
    global_t *global = global_get_ptr();
-   bool allow_bps   = !global->ups_pref && !global->ips_pref;
+   bool allow_bps   = !global->patch.ups_pref && !global->patch.ips_pref;
 
    if (!allow_bps)
       return false;
-   if (global->bps_name[0] == '\0')
+   if (global->name.bps[0] == '\0')
       return false;
 
-   return apply_patch_content(buf, size, "BPS", global->bps_name,
+   return apply_patch_content(buf, size, "BPS", global->name.bps,
          bps_apply_patch);
 }
 
 static bool try_ups_patch(uint8_t **buf, ssize_t *size)
 {
    global_t *global = global_get_ptr();
-   bool allow_ups   = !global->bps_pref && !global->ips_pref;
+   bool allow_ups   = !global->patch.bps_pref && !global->patch.ips_pref;
 
    if (!allow_ups)
       return false;
-   if (global->ups_name[0] == '\0')
+   if (global->name.ups[0] == '\0')
       return false;
 
-   return apply_patch_content(buf, size, "UPS", global->ups_name,
+   return apply_patch_content(buf, size, "UPS", global->name.ups,
          ups_apply_patch);
 }
 
 static bool try_ips_patch(uint8_t **buf, ssize_t *size)
 {
    global_t *global = global_get_ptr();
-   bool allow_ips   = !global->ups_pref && !global->bps_pref;
+   bool allow_ips   = !global->patch.ups_pref && !global->patch.bps_pref;
 
    if (!allow_ips)
       return false;
-   if (global->ips_name[0] == '\0')
+   if (global->name.ips[0] == '\0')
       return false;
 
-   return apply_patch_content(buf, size, "IPS", global->ips_name,
+   return apply_patch_content(buf, size, "IPS", global->name.ips,
          ips_apply_patch);
 }
 
@@ -564,14 +569,14 @@ void patch_content(uint8_t **buf, ssize_t *size)
 {
    global_t *global = global_get_ptr();
 
-   if (global->ups_pref + global->bps_pref + global->ips_pref > 1)
+   if (global->patch.ips_pref + global->patch.bps_pref + global->patch.ups_pref > 1)
    {
       RARCH_WARN("Several patches are explicitly defined, ignoring all ...\n");
       return;
    }
 
-   if (!try_ups_patch(buf, size) && !try_bps_patch(buf, size) && !try_ips_patch(buf, size))
+   if (!try_ips_patch(buf, size) && !try_bps_patch(buf, size) && !try_ups_patch(buf, size))
    {
-      RARCH_WARN("Did not find a valid content patch.\n");
+      RARCH_LOG("Did not find a valid content patch.\n");
    }
 }

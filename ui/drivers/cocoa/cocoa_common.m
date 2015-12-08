@@ -33,6 +33,9 @@
 #endif
 #endif
 
+#include "../../../location/location_driver.h"
+#include "../../../camera/camera_driver.h"
+
 static CocoaView* g_instance;
 
 #if defined(HAVE_COCOA)
@@ -109,12 +112,26 @@ void *glkitview_init(void);
 
 - (void)viewWillLayoutSubviews
 {
+   float width = 0.0f, height = 0.0f, tenpctw, tenpcth;
+   RAScreen *screen  = (__bridge RAScreen*)get_chosen_screen();
    UIInterfaceOrientation orientation = self.interfaceOrientation;
-   CGRect screenSize = [[UIScreen mainScreen] bounds];
-   float width       = ((int)orientation < 3) ? CGRectGetWidth(screenSize) : CGRectGetHeight(screenSize);
-   float height      = ((int)orientation < 3) ? CGRectGetHeight(screenSize) : CGRectGetWidth(screenSize);
-   float tenpctw     = width / 10.0f;
-   float tenpcth     = height / 10.0f;
+   CGRect screenSize = [screen bounds];
+   SEL selector = NSSelectorFromString(BOXSTRING("coordinateSpace"));
+    
+    if ([screen respondsToSelector:selector])
+    {
+        screenSize  = [[screen coordinateSpace] bounds];
+        width       = CGRectGetWidth(screenSize);
+        height      = CGRectGetHeight(screenSize);
+    }
+    else
+    {
+        width       = ((int)orientation < 3) ? CGRectGetWidth(screenSize) : CGRectGetHeight(screenSize);
+        height      = ((int)orientation < 3) ? CGRectGetHeight(screenSize) : CGRectGetWidth(screenSize);
+    }
+   
+   tenpctw          = width  / 10.0f;
+   tenpcth          = height / 10.0f;
    
    g_pause_indicator_view.frame = CGRectMake(tenpctw * 4.0f, 0.0f, tenpctw * 2.0f, tenpcth);
    [g_pause_indicator_view viewWithTag:1].frame = CGRectMake(0, 0, tenpctw * 2.0f, tenpcth);
@@ -157,7 +174,7 @@ void *glkitview_init(void);
 #endif
 
 #ifdef HAVE_AVFOUNDATION
-#include "../../gfx/drivers/gl_common.h"
+#include "../../gfx/common/gl_common.h"
 
 #ifndef GL_BGRA
 #define GL_BGRA 0x80E1
@@ -410,7 +427,7 @@ static void *apple_camera_init(const char *device, uint64_t caps, unsigned width
 {
    applecamera_t *applecamera;
     
-   if ((caps & (1ULL << RETRO_CAMERA_BUFFER_OPENGL_TEXTURE)) == 0)
+   if ((caps & (UINT64_C(1) << RETRO_CAMERA_BUFFER_OPENGL_TEXTURE)) == 0)
    {
       RARCH_ERR("applecamera returns OpenGL texture.\n");
       return NULL;

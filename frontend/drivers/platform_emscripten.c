@@ -16,20 +16,50 @@
  */
 
 #include <emscripten/emscripten.h>
-#include "../../general.h"
+
 #include <file/config_file.h>
+
+#include "../../general.h"
 #include "../../content.h"
 #include "../frontend.h"
+#include "../../retroarch.h"
+#include "../../runloop.h"
 #include "../frontend_driver.h"
 
 static void emscripten_mainloop(void)
 {
-   if (rarch_main_iterate() != -1)
+   unsigned sleep_ms = 0;
+   int ret = runloop_iterate(&sleep_ms);
+   if (ret == 1 && sleep_ms > 0)
+      retro_sleep(sleep_ms);
+   runloop_data_iterate();
+   if (ret != -1)
       return;
 
    main_exit(NULL);
    exit(0);
 }
+
+void cmd_savefiles(void)
+{
+   event_command(EVENT_CMD_SAVEFILES);
+}
+
+void cmd_save_state(void)
+{
+   event_command(EVENT_CMD_SAVE_STATE);
+}
+
+void cmd_load_state(void)
+{
+   event_command(EVENT_CMD_LOAD_STATE);
+}
+
+void cmd_take_screenshot(void)
+{
+   event_command(EVENT_CMD_TAKE_SCREENSHOT);
+}
+
 
 int main(int argc, char *argv[])
 {

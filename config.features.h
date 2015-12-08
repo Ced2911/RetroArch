@@ -32,6 +32,18 @@ static const bool _network_command_supp = true;
 static const bool _network_command_supp = false;
 #endif
 
+#ifdef HAVE_NETWORK_GAMEPAD
+static const bool _network_gamepad_supp = true;
+#else
+static const bool _network_gamepad_supp = false;
+#endif
+
+#ifdef HAVE_FILTERS_BUILTIN
+static const bool _cpu_filters = true;
+#else
+static const bool _cpu_filters = false;
+#endif
+
 #ifdef HAVE_LIBUSB
 static const bool _libusb_supp = true;
 #else
@@ -302,12 +314,6 @@ static const bool _avfoundation_supp = false;
 #else
 #define GLOBAL_CONFIG_DIR "/etc"
 #endif
-#endif
-
-#ifdef _WIN32
-#define RARCH_DEFAULT_CONF_PATH_STR "\n\t\tDefaults to retroarch.cfg in same directory as retroarch.exe.\n\t\tIf a default config is not found, " RETRO_FRONTEND " will attempt to create one."
-#else
-#define RARCH_DEFAULT_CONF_PATH_STR "\n\t\tBy default looks for config in $XDG_CONFIG_HOME/retroarch/retroarch.cfg,\n\t\t$HOME/.config/retroarch/retroarch.cfg,\n\t\tand $HOME/.retroarch.cfg.\n\t\tIf a default config is not found, " RETRO_FRONTEND " will attempt to create one based on the skeleton config (" GLOBAL_CONFIG_DIR "/retroarch.cfg)."
 #endif
 
 #endif

@@ -158,12 +158,14 @@ if [ "$HAVE_NETWORKING" = 'yes' ]; then
       fi
    fi
    HAVE_NETWORK_CMD=yes
+   HAVE_NETWORK_GAMEPAD=yes
 
    [ "$HAVE_NETPLAY" != 'no' ] && HAVE_NETPLAY='yes'
 else
    echo "Warning: All networking features have been disabled."
    HAVE_NETWORK_CMD='no'
    HAVE_NETPLAY='no'
+   HAVE_NETWORK_GAMEPAD='no'
 fi
 
 check_lib STDIN_CMD "$CLIB" fcntl
@@ -222,7 +224,7 @@ if [ "$HAVE_SDL2" = 'yes' ]; then
    fi
 fi
 
-check_pkgconf LIBUSB libusb-1.0
+check_pkgconf LIBUSB libusb-1.0 1.0.16
 
 if [ "$OS" = 'Win32' ]; then
    check_lib DINPUT -ldinput8
@@ -240,22 +242,35 @@ fi
 
 if [ "$HAVE_OPENGL" != 'no' ] && [ "$HAVE_GLES" != 'yes' ]; then
    if [ "$OS" = 'Darwin' ]; then
-      check_lib CG "-framework Cg" cgCreateContext
-      [ "$HAVE_CG" = 'yes' ] && CG_LIBS='-framework Cg'
+      check_header OPENGL "OpenGL/gl.h"
+      check_lib OPENGL "-framework OpenGL"
    elif [ "$OS" = 'Win32' ]; then
-      check_lib_cxx CG -lcg cgCreateContext
-      [ "$HAVE_CG" = 'yes' ] && CG_LIBS='-lcg -lcgGL'
+      check_header OPENGL "GL/gl.h"
+      check_lib OPENGL -lopengl32
    else
-      # On some distros, -lCg doesn't link against -lstdc++ it seems ...
-      check_lib_cxx CG -lCg cgCreateContext
-      [ "$HAVE_CG" = 'yes' ] && CG_LIBS='-lCg -lCgGL'
+      check_header OPENGL "GL/gl.h"
+      check_lib OPENGL -lGL
    fi
 
-   # fix undefined variables
-   PKG_CONF_USED="$PKG_CONF_USED CG"
-else
-   echo "Notice: Ignoring Cg. Desktop OpenGL is not enabled."
-   HAVE_CG='no'
+   if [ "$HAVE_OPENGL" = 'yes' ]; then
+      if [ "$OS" = 'Darwin' ]; then
+         check_lib CG "-framework Cg" cgCreateContext
+         [ "$HAVE_CG" = 'yes' ] && CG_LIBS='-framework Cg'
+      elif [ "$OS" = 'Win32' ]; then
+         check_lib_cxx CG -lcg cgCreateContext
+         [ "$HAVE_CG" = 'yes' ] && CG_LIBS='-lcg -lcgGL'
+      else
+         # On some distros, -lCg doesn't link against -lstdc++ it seems ...
+         check_lib_cxx CG -lCg cgCreateContext
+         [ "$HAVE_CG" = 'yes' ] && CG_LIBS='-lCg -lCgGL'
+      fi
+
+      # fix undefined variables
+      PKG_CONF_USED="$PKG_CONF_USED CG"
+   else
+      echo "Notice: Ignoring Cg. Desktop OpenGL is not enabled."
+      HAVE_CG='no'
+   fi
 fi
 
 if [ "$OS" = 'Darwin' ]; then
@@ -268,12 +283,13 @@ if [ "$HAVE_THREADS" != 'no' ]; then
    if [ "$HAVE_FFMPEG" != 'no' ]; then
       check_pkgconf AVCODEC libavcodec 54
       check_pkgconf AVFORMAT libavformat 54
+      check_pkgconf SWRESAMPLE libswresample
       check_pkgconf AVUTIL libavutil 51
       check_pkgconf SWSCALE libswscale 2.1
       check_header AV_CHANNEL_LAYOUT libavutil/channel_layout.h
 
       HAVE_FFMPEG='yes'
-      if [ "$HAVE_AVCODEC" = 'no' ] || [ "$HAVE_AVFORMAT" = 'no' ] || [ "$HAVE_AVUTIL" = 'no' ] || [ "$HAVE_SWSCALE" = 'no' ]; then
+      if [ "$HAVE_AVCODEC" = 'no' ] || [ "$HAVE_SWRESAMPLE" = 'no' ] || [ "$HAVE_AVFORMAT" = 'no' ] || [ "$HAVE_AVUTIL" = 'no' ] || [ "$HAVE_SWSCALE" = 'no' ]; then
          HAVE_FFMPEG='no'
          echo "Notice: FFmpeg recording disabled due to missing or unsuitable packages."
       fi
@@ -341,7 +357,7 @@ fi
 
 check_pkgconf FREETYPE freetype2
 check_pkgconf X11 x11
-[ "$HAVE_X11" = "no" ] && HAVE_XEXT=no && HAVE_XF86VM=no && HAVE_XINERAMA=no
+[ "$HAVE_X11" = "no" ] && HAVE_XEXT=no && HAVE_XF86VM=no && HAVE_XINERAMA=no && HAVE_XSHM=no
 
 check_pkgconf WAYLAND wayland-egl
 
@@ -365,14 +381,32 @@ if [ "$HAVE_UDEV" != "no" ]; then
    fi
 fi
 
+check_header XSHM X11/Xlib.h X11/extensions/XShm.h
+
 check_header PARPORT linux/parport.h
 check_header PARPORT linux/ppdev.h
 
-check_lib STRL "$CLIB" strlcpy
+if [ "$OS" != 'Win32' ]; then
+   check_lib STRL "$CLIB" strlcpy
+fi
 check_lib STRCASESTR "$CLIB" strcasestr
 check_lib MMAP "$CLIB" mmap
 
 check_pkgconf PYTHON python3
+
+if [ "$HAVE_MATERIALUI" != 'no' ] || [ "$HAVE_XMB" != 'no' ] || [ "$HAVE_ZARCH" != 'no' ]; then
+	if [ "$HAVE_RGUI" = 'no' ]; then
+		HAVE_MATERIALUI=no
+		HAVE_XMB=no
+      HAVE_ZARCH=no
+		echo "Notice: RGUI not available, MaterialUI, XMB and ZARCH will be disabled."
+	elif [ "$HAVE_OPENGL" = 'no' ] && [ "$HAVE_GLES" = 'no' ]; then
+		HAVE_MATERIALUI=no
+		HAVE_XMB=no
+      HAVE_ZARCH=no
+		echo "Notice: GL/GLES not available, XMB, MaterialUI and ZARCH will be disabled."
+	fi
+fi
 
 check_macro NEON __ARM_NEON__
 
@@ -380,6 +414,6 @@ add_define_make OS "$OS"
 
 # Creates config.mk and config.h.
 add_define_make GLOBAL_CONFIG_DIR "$GLOBAL_CONFIG_DIR"
-VARS="RGUI LAKKA GLUI XMB ALSA OSS OSS_BSD OSS_LIB AL RSOUND ROAR JACK COREAUDIO CORETEXT PULSE SDL SDL2 D3D9 DINPUT LIBUSB XINPUT DSOUND XAUDIO OPENGL EXYNOS DISPMANX SUNXI OMAP GLES GLES3 VG EGL KMS GBM DRM DYLIB GETOPT_LONG THREADS CG LIBXML2 ZLIB DYNAMIC FFMPEG AVCODEC AVFORMAT AVUTIL SWSCALE FREETYPE XKBCOMMON XVIDEO X11 XEXT XF86VM XINERAMA WAYLAND MALI_FBDEV VIVANTE_FBDEV NETWORKING NETPLAY NETWORK_CMD STDIN_CMD COMMAND SOCKET_LEGACY FBO STRL STRCASESTR MMAP PYTHON FFMPEG_ALLOC_CONTEXT3 FFMPEG_AVCODEC_OPEN2 FFMPEG_AVIO_OPEN FFMPEG_AVFORMAT_WRITE_HEADER FFMPEG_AVFORMAT_NEW_STREAM FFMPEG_AVCODEC_ENCODE_AUDIO2 FFMPEG_AVCODEC_ENCODE_VIDEO2 BSV_MOVIE VIDEOCORE NEON FLOATHARD FLOATSOFTFP UDEV V4L2 AV_CHANNEL_LAYOUT 7ZIP PARPORT COCOA AVFOUNDATION CORELOCATION IOHIDMANAGER"
+VARS=$(eval set | grep ^HAVE_ | sed s/=.*// | sed s/^HAVE_//)
 create_config_make config.mk $VARS
 create_config_header config.h $VARS

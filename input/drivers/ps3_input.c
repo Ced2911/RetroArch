@@ -17,10 +17,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include <sdk_version.h>
 #include <boolean.h>
 
-#include "../../ps3/sdk_defines.h"
+#include <sdk_version.h>
+
+#include "../../defines/ps3_defines.h"
 
 #include "../../driver.h"
 #include "../../libretro.h"
@@ -45,6 +46,7 @@ typedef struct
 
 typedef struct ps3_input
 {
+   bool blocked;
 #ifdef HAVE_MOUSE
    unsigned mice_connected;
 #endif
@@ -113,7 +115,7 @@ static int16_t ps3_input_state(void *data,
       case RETRO_DEVICE_SENSOR_ACCELEROMETER:
          switch (id)
          {
-            // fixed range of 0x000 - 0x3ff
+            /* Fixed range of 0x000 - 0x3ff */
             case RETRO_DEVICE_ID_SENSOR_ACCELEROMETER_X:
                retval = ps3->accelerometer_state[port].x;
                break;
@@ -161,10 +163,10 @@ static void* ps3_input_init(void)
    if (!ps3)
       return NULL;
 
-   ps3->joypad = input_joypad_init_driver(settings->input.joypad_driver);
+   ps3->joypad = input_joypad_init_driver(settings->input.joypad_driver, ps3);
 
    if (ps3->joypad)
-      ps3->joypad->init();
+      ps3->joypad->init(ps3);
 
 #ifdef HAVE_MOUSE
    cellMouseInit(MAX_MICE);
@@ -174,15 +176,18 @@ static void* ps3_input_init(void)
 
 static bool ps3_input_key_pressed(void *data, int key)
 {
-   ps3_input_t *ps3 = (ps3_input_t*)data;
+   ps3_input_t *ps3     = (ps3_input_t*)data;
    settings_t *settings = config_get_ptr();
-   global_t   *global   = global_get_ptr();
 
-   if (!ps3)
-      return false;
+   if (input_joypad_pressed(ps3->joypad, 0, settings->input.binds[0], key))
+      return true;
 
-   return (global->lifecycle_state & (1ULL << key)) || 
-      input_joypad_pressed(ps3->joypad, 0, settings->input.binds[0], key);
+   return false;
+}
+
+static bool ps3_input_meta_key_pressed(void *data, int key)
+{
+   return false;
 }
 
 static uint64_t ps3_input_get_capabilities(void *data)
@@ -247,11 +252,28 @@ static void ps3_input_grab_mouse(void *data, bool state)
    (void)state;
 }
 
+static bool ps3_input_keyboard_mapping_is_blocked(void *data)
+{
+   ps3_input_t *ps3 = (ps3_input_t*)data;
+   if (!ps3)
+      return false;
+   return ps3->blocked;
+}
+
+static void ps3_input_keyboard_mapping_set_block(void *data, bool value)
+{
+   ps3_input_t *ps3 = (ps3_input_t*)data;
+   if (!ps3)
+      return;
+   ps3->blocked = value;
+}
+
 input_driver_t input_ps3 = {
    ps3_input_init,
    ps3_input_poll,
    ps3_input_state,
    ps3_input_key_pressed,
+   ps3_input_meta_key_pressed,
    ps3_input_free_input,
    ps3_input_set_sensor_state,
    NULL,
@@ -259,6 +281,10 @@ input_driver_t input_ps3 = {
    "ps3",
 
    ps3_input_grab_mouse,
+   NULL,
    ps3_input_set_rumble,
    ps3_input_get_joypad_driver,
+   NULL,
+   ps3_input_keyboard_mapping_is_blocked,
+   ps3_input_keyboard_mapping_set_block,
 };

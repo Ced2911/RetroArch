@@ -1,8 +1,7 @@
 /* Copyright  (C) 2010-2015 The RetroArch team
  *
  * ---------------------------------------------------------------------------------------
- * The following license statement only applies to this file (strcasestr.h).
- * ---------------------------------------------------------------------------------------
+ * The following license statement only applies to this file (strcasestr.h).  * ---------------------------------------------------------------------------------------
  *
  * Permission is hereby granted, free of charge,
  * to any person obtaining a copy of this software and associated documentation files (the "Software"),
@@ -37,7 +36,7 @@ extern "C" {
 
 /* Avoid possible naming collisions during link 
  * since we prefer to use the actual name. */
-#define strcasestr(haystack, needle) strcasestr_rarch__(haystack, needle)
+#define strcasestr(haystack, needle) strcasestr_retro__(haystack, needle)
 
 char *strcasestr(const char *haystack, const char *needle);
 

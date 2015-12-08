@@ -16,15 +16,19 @@
 
 #include <IOKit/hid/IOHIDManager.h>
 #include <IOKit/hid/IOHIDKeys.h>
+
 #include "../connect/joypad_connection.h"
-#include "../drivers/cocoa_input.h"
 #include "../input_autodetect.h"
 #include "../input_hid_driver.h"
+#include "../../configuration.h"
+#include "../../verbosity.h"
 
 typedef struct apple_hid
 {
    IOHIDManagerRef ptr;
    joypad_connection_t *slots;
+   uint32_t buttons[MAX_USERS];
+   int16_t axes[MAX_USERS][6];
 } iohidmanager_hid_t;
 
 struct iohidmanager_hid_adapter
@@ -60,6 +64,7 @@ static uint64_t iohidmanager_hid_joypad_get_buttons(void *data, unsigned port)
 static bool iohidmanager_hid_joypad_button(void *data, unsigned port, uint16_t joykey)
 {
    uint64_t buttons          = iohidmanager_hid_joypad_get_buttons(data, port);
+   iohidmanager_hid_t *hid   = (iohidmanager_hid_t*)data;
 
    if (joykey == NO_BTN)
       return false;
@@ -70,7 +75,8 @@ static bool iohidmanager_hid_joypad_button(void *data, unsigned port, uint16_t j
 
    /* Check the button. */
    if ((port < MAX_USERS) && (joykey < 32))
-      return ((buttons & (1 << joykey)) != 0);
+      return ((buttons & (1 << joykey)) != 0) || ((hid->buttons[port] & (1 << joykey)) != 0)
+         ;
    return false;
 }
 
@@ -91,16 +97,18 @@ static int16_t iohidmanager_hid_joypad_axis(void *data, unsigned port, uint32_t 
    if (joyaxis == AXIS_NONE)
       return 0;
 
-   if (AXIS_NEG_GET(joyaxis) < 4)
+   if (AXIS_NEG_GET(joyaxis) < 6)
    {
-      val = pad_connection_get_axis(&hid->slots[port], port, AXIS_NEG_GET(joyaxis));
+      val += hid->axes[port][AXIS_NEG_GET(joyaxis)];
+      val += pad_connection_get_axis(&hid->slots[port], port, AXIS_NEG_GET(joyaxis));
 
       if (val >= 0)
          val = 0;
    }
-   else if(AXIS_POS_GET(joyaxis) < 4)
+   else if(AXIS_POS_GET(joyaxis) < 6)
    {
-      val = pad_connection_get_axis(&hid->slots[port], port, AXIS_POS_GET(joyaxis));
+      val += hid->axes[port][AXIS_POS_GET(joyaxis)];
+      val += pad_connection_get_axis(&hid->slots[port], port, AXIS_POS_GET(joyaxis));
 
       if (val <= 0)
          val = 0;
@@ -125,10 +133,9 @@ static void iohidmanager_hid_device_report(void *data,
       CFIndex reportLength)
 {
    struct iohidmanager_hid_adapter *adapter = (struct iohidmanager_hid_adapter*)data;
-   driver_t *driver = driver_get_ptr();
-   iohidmanager_hid_t *hid = driver ? (iohidmanager_hid_t*)driver->hid_data : NULL;
+   iohidmanager_hid_t *hid = (iohidmanager_hid_t*)hid_driver_get_data();
 
-   if (adapter)
+   if (hid && adapter)
       pad_connection_packet(&hid->slots[adapter->slot], adapter->slot,
             adapter->data, reportLength + 1);
 }
@@ -139,8 +146,7 @@ static void iohidmanager_hid_device_report(void *data,
 static void iohidmanager_hid_device_input_callback(void *data, IOReturn result,
       void* sender, IOHIDValueRef value)
 {
-   driver_t                  *driver = driver_get_ptr();
-   cocoa_input_data_t         *apple = (cocoa_input_data_t*)driver->input_data;
+   iohidmanager_hid_t *hid = (iohidmanager_hid_t*)hid_driver_get_data();
    struct iohidmanager_hid_adapter *adapter = (struct iohidmanager_hid_adapter*)data;
    IOHIDElementRef element           = IOHIDValueGetElement(value);
    uint32_t type                     = IOHIDElementGetType(element);
@@ -168,19 +174,25 @@ static void iohidmanager_hid_device_input_callback(void *data, IOReturn result,
                   default:
                      {
                         int i;
-                        static const uint32_t axis_use_ids[4] = { 48, 49, 50, 53 };
+                        // +0/-0   =>   Left Stick Horizontal       => 48
+                        // +1/-1   =>   Left Stick Vertical         => 49
+                        // +2/-2   =>   Right Stick Horizontal      => 51
+                        // +3/-3   =>   Right Stick Vertical        => 52
+                        // +4/-4   =>   Left Trigger (if exists)    => 50
+                        // +5/-5   =>   Right Trigger (if exists)   => 53
+                        static const uint32_t axis_use_ids[6] = { 48, 49, 51, 52, 50, 53 };
 
-                        for (i = 0; i < 4; i ++)
+                        for (i = 0; i < 6; i ++)
                         {
                            CFIndex min   = IOHIDElementGetPhysicalMin(element);
-                           CFIndex max   = IOHIDElementGetPhysicalMax(element) - min;
                            CFIndex state = IOHIDValueGetIntegerValue(value) - min;
+                           CFIndex max   = IOHIDElementGetPhysicalMax(element) - min;
                            float val     = (float)state / (float)max;
 
                            if (use != axis_use_ids[i])
                               continue;
 
-                           apple->axes[adapter->slot][i] =
+                           hid->axes[adapter->slot][i] =
                               ((val * 2.0f) - 1.0f) * 32767.0f;
                         }
                      }
@@ -195,12 +207,12 @@ static void iohidmanager_hid_device_input_callback(void *data, IOReturn result,
             case kIOHIDElementTypeInput_Button:
                {
                   CFIndex state = IOHIDValueGetIntegerValue(value);
-                  unsigned id = use - 1;
+                  unsigned   id = use - 1;
 
                   if (state)
-                     BIT64_SET(apple->buttons[adapter->slot], id);
+                     BIT64_SET(hid->buttons[adapter->slot], id);
                   else
-                     BIT64_CLEAR(apple->buttons[adapter->slot], id);
+                     BIT64_CLEAR(hid->buttons[adapter->slot], id);
                }
                break;
          }
@@ -210,21 +222,15 @@ static void iohidmanager_hid_device_input_callback(void *data, IOReturn result,
 
 static void iohidmanager_hid_device_remove(void *data, IOReturn result, void* sender)
 {
-   driver_t                  *driver = driver_get_ptr();
-   cocoa_input_data_t         *apple = (cocoa_input_data_t*)driver->input_data;
    struct iohidmanager_hid_adapter *adapter = (struct iohidmanager_hid_adapter*)data;
-   iohidmanager_hid_t                  *hid = driver ? (iohidmanager_hid_t*)driver->hid_data : NULL;
+   iohidmanager_hid_t *hid = (iohidmanager_hid_t*)hid_driver_get_data();
 
-   if (adapter && (adapter->slot < MAX_USERS))
+   if (hid && adapter && (adapter->slot < MAX_USERS))
    {
-      char msg[PATH_MAX_LENGTH];
+      input_config_autoconfigure_disconnect(adapter->slot, adapter->name);
 
-      snprintf(msg, sizeof(msg), "Device #%u (%s) disconnected.",
-            adapter->slot, adapter->name);
-      rarch_main_msg_queue_push(msg, 0, 60, false);
-
-      apple->buttons[adapter->slot] = 0;
-      memset(apple->axes[adapter->slot], 0, sizeof(apple->axes));
+      hid->buttons[adapter->slot] = 0;
+      memset(hid->axes[adapter->slot], 0, sizeof(hid->axes));
 
       pad_connection_pad_deinit(&hid->slots[adapter->slot], adapter->slot);
       free(adapter);
@@ -234,7 +240,7 @@ static void iohidmanager_hid_device_remove(void *data, IOReturn result, void* se
 static int32_t iohidmanager_hid_device_get_int_property(IOHIDDeviceRef device, CFStringRef key)
 {
    int32_t value;
-   CFNumberRef ref = IOHIDDeviceGetProperty(device, key);
+   CFNumberRef ref = (CFNumberRef)IOHIDDeviceGetProperty(device, key);
 
    if (ref)
    {
@@ -260,7 +266,7 @@ static uint16_t iohidmanager_hid_device_get_product_id(IOHIDDeviceRef device)
 
 static void iohidmanager_hid_device_get_product_string(IOHIDDeviceRef device, char *buf, size_t len)
 {
-   CFStringRef ref = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductKey));
+   CFStringRef ref = (CFStringRef)IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductKey));
 
    if (ref)
       CFStringGetCString(ref, buf, len, kCFStringEncodingUTF8);
@@ -290,8 +296,7 @@ static void iohidmanager_hid_device_add(void *data, IOReturn result,
    uint16_t dev_vid, dev_pid;
 
    settings_t *settings = config_get_ptr();
-   driver_t   *driver   = driver_get_ptr();
-   iohidmanager_hid_t     *hid = driver ? (iohidmanager_hid_t*)driver->hid_data : NULL;
+   iohidmanager_hid_t     *hid = (iohidmanager_hid_t*)hid_driver_get_data();
    struct iohidmanager_hid_adapter *adapter = (struct iohidmanager_hid_adapter*)
       calloc(1, sizeof(*adapter));
 
@@ -303,7 +308,10 @@ static void iohidmanager_hid_device_add(void *data, IOReturn result,
    ret = IOHIDDeviceOpen(device, kIOHIDOptionsTypeNone);
 
    if (ret != kIOReturnSuccess)
-      goto error;
+   {
+      free(adapter);
+      return;
+   }
 
    /* Move the device's run loop to this thread. */
    IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetCurrent(),
@@ -321,6 +329,9 @@ static void iohidmanager_hid_device_add(void *data, IOReturn result,
    adapter->slot = pad_connection_pad_init(hid->slots,
          adapter->name, dev_vid, dev_pid, adapter, &iohidmanager_hid_device_send_control);
 
+   if (adapter->slot == -1)
+       return;
+
    if (pad_connection_has_interface(hid->slots, adapter->slot))
       IOHIDDeviceRegisterInputReportCallback(device,
             adapter->data + 1, sizeof(adapter->data) - 1,
@@ -333,13 +344,10 @@ static void iohidmanager_hid_device_add(void *data, IOReturn result,
       return;
 
    strlcpy(settings->input.device_names[adapter->slot],
-         adapter->name, sizeof(settings->input.device_names));
+         adapter->name, sizeof(settings->input.device_names[adapter->slot]));
 
    iohidmanager_hid_device_add_autodetect(adapter->slot,
          adapter->name, iohidmanager_hid.ident, dev_vid, dev_pid);
-
-error:
-   return;
 }
 
 static void iohidmanager_hid_append_matching_dictionary(CFMutableArrayRef array,
@@ -424,16 +432,20 @@ static void *iohidmanager_hid_init(void)
 
    if (!hid_apple)
       goto error;
+   hid_apple->slots = pad_connection_init(MAX_USERS);
+   if (!hid_apple->slots)
+      goto error;
    if (iohidmanager_hid_manager_init(hid_apple) == -1)
       goto error;
    if (iohidmanager_hid_manager_set_device_matching(hid_apple) == -1)
       goto error;
 
-   hid_apple->slots = (joypad_connection_t*)pad_connection_init(MAX_USERS);
-
    return hid_apple;
 
 error:
+   if (hid_apple->slots)
+      free(hid_apple->slots);
+   hid_apple->slots = NULL;
    if (hid_apple)
       free(hid_apple);
    return NULL;

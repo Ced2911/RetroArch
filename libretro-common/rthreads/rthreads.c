@@ -20,8 +20,10 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <rthreads/rthreads.h>
 #include <stdlib.h>
+
+#include <boolean.h>
+#include <rthreads/rthreads.h>
 
 #if defined(_WIN32)
 #ifdef _XBOX
@@ -84,6 +86,8 @@ static void *thread_wrap(void *data_)
 #endif
 {
    struct thread_data *data = (struct thread_data*)data_;
+   if (!data)
+	   return 0;
    data->func(data->userdata);
    free(data);
    return 0;
@@ -101,33 +105,37 @@ static void *thread_wrap(void *data_)
  */
 sthread_t *sthread_create(void (*thread_func)(void*), void *userdata)
 {
-   sthread_t *thread = (sthread_t*)calloc(1, sizeof(*thread));
+   bool thread_created      = false;
+   struct thread_data *data = NULL;
+   sthread_t *thread        = (sthread_t*)calloc(1, sizeof(*thread));
+
    if (!thread)
       return NULL;
 
-   struct thread_data *data = (struct thread_data*)calloc(1, sizeof(*data));
+   data                     = (struct thread_data*)calloc(1, sizeof(*data));
    if (!data)
-   {
-      free(thread);
-      return NULL;
-   }
+      goto error;
 
    data->func = thread_func;
    data->userdata = userdata;
 
 #ifdef _WIN32
    thread->thread = CreateThread(NULL, 0, thread_wrap, data, 0, NULL);
-   if (!thread->thread)
+   thread_created = thread->thread;
 #else
-   if (pthread_create(&thread->id, NULL, thread_wrap, data) < 0)
+   thread_created = pthread_create(&thread->id, NULL, thread_wrap, data) == 0;
 #endif
-   {
-      free(data);
-      free(thread);
-      return NULL;
-   }
+
+   if (!thread_created)
+      goto error;
 
    return thread;
+
+error:
+   if (data)
+      free(data);
+   free(thread);
+   return NULL;
 }
 
 /**
@@ -184,22 +192,26 @@ void sthread_join(sthread_t *thread)
  **/
 slock_t *slock_new(void)
 {
-   slock_t *lock = (slock_t*)calloc(1, sizeof(*lock));
+   bool mutex_created = false;
+   slock_t      *lock = (slock_t*)calloc(1, sizeof(*lock));
    if (!lock)
       return NULL;
 
 #ifdef _WIN32
-   lock->lock = CreateMutex(NULL, FALSE, NULL);
-   if (!lock->lock)
+   lock->lock         = CreateMutex(NULL, FALSE, NULL);
+   mutex_created      = lock->lock;
 #else
-   if (pthread_mutex_init(&lock->lock, NULL) < 0)
+   mutex_created      = (pthread_mutex_init(&lock->lock, NULL) == 0);
 #endif
-   {
-      free(lock);
-      return NULL;
-   }
+
+   if (!mutex_created)
+      goto error;
 
    return lock;
+
+error:
+   free(lock);
+   return NULL;
 }
 
 /**
@@ -264,22 +276,27 @@ void slock_unlock(slock_t *lock)
  **/
 scond_t *scond_new(void)
 {
-   scond_t *cond = (scond_t*)calloc(1, sizeof(*cond));
+   bool event_created = false;
+   scond_t      *cond = (scond_t*)calloc(1, sizeof(*cond));
+
    if (!cond)
       return NULL;
 
 #ifdef _WIN32
-   cond->event = CreateEvent(NULL, FALSE, FALSE, NULL);
-   if (!cond->event)
+   cond->event   = CreateEvent(NULL, FALSE, FALSE, NULL);
+   event_created = cond->event;
 #else
-   if (pthread_cond_init(&cond->cond, NULL) < 0)
+   event_created = (pthread_cond_init(&cond->cond, NULL) == 0);
 #endif
-   {
-      free(cond);
-      return NULL;
-   }
+
+   if (!event_created)
+      goto error;
 
    return cond;
+
+error:
+   free(cond);
+   return NULL;
 }
 
 /**
@@ -380,6 +397,7 @@ bool scond_wait_timeout(scond_t *cond, slock_t *lock, int64_t timeout_us)
    return ret == WAIT_OBJECT_0;
 #else
    int ret;
+   int64_t seconds, remainder;
    struct timespec now = {0};
 
 #ifdef __MACH__
@@ -410,11 +428,11 @@ bool scond_wait_timeout(scond_t *cond, slock_t *lock, int64_t timeout_us)
    clock_gettime(CLOCK_REALTIME, &now);
 #endif
 
-   now.tv_sec += timeout_us / 1000000LL;
-   now.tv_nsec += timeout_us * 1000LL;
+   seconds      = timeout_us / INT64_C(1000000);
+   remainder    = timeout_us % INT64_C(1000000);
 
-   now.tv_sec += now.tv_nsec / 1000000000LL;
-   now.tv_nsec = now.tv_nsec % 1000000000LL;
+   now.tv_sec  += seconds;
+   now.tv_nsec += remainder * INT64_C(1000);
 
    ret = pthread_cond_timedwait(&cond->cond, &lock->lock, &now);
    return (ret == 0);

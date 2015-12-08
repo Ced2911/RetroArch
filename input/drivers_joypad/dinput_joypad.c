@@ -14,25 +14,30 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <dinput.h>
-
-#include "../../general.h"
-#include <boolean.h>
-#include "../input_autodetect.h"
-#include "../input_common.h"
-#include "../input_joypad.h"
-#include "../input_keymaps.h"
-#include "../../retroarch_logger.h"
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
 #include <windowsx.h>
+
+#include <dinput.h>
+
+#include <boolean.h>
+
+#include "../../general.h"
+#include "../../verbosity.h"
+#include "../input_autodetect.h"
+#include "../input_config.h"
+#include "../input_joypad_driver.h"
+#include "../input_keymaps.h"
 
 struct dinput_joypad
 {
    LPDIRECTINPUTDEVICE8 joypad;
    DIJOYSTATE2 joy_state;
    char* joy_name;
+   char* joy_friendly_name;
+   int32_t vid;
+   int32_t pid;
 };
 
 static struct dinput_joypad g_pads[MAX_USERS];
@@ -68,6 +73,8 @@ static void dinput_joypad_destroy(void)
       
       free(g_pads[i].joy_name);
       g_pads[i].joy_name = NULL;
+      free(g_pads[i].joy_friendly_name);
+      g_pads[i].joy_friendly_name = NULL;
       *settings->input.device_names[i] = '\0';
    }
 
@@ -139,9 +146,9 @@ static bool guid_is_xinput_device(const GUID* product_guid)
    for (i = 0; i < num_raw_devs; i++)
    {
       RID_DEVICE_INFO rdi;
-      char devName[128];
-      UINT rdiSize = sizeof(rdi);
-      UINT nameSize = sizeof(devName);
+      char devName[128]   = {0};
+      UINT rdiSize        = sizeof(rdi);
+      UINT nameSize       = sizeof(devName);
 
       rdi.cbSize = sizeof (rdi);
 
@@ -156,7 +163,7 @@ static bool guid_is_xinput_device(const GUID* product_guid)
          return true;
       }
    }
-   
+
    free(raw_devs);
    raw_devs = NULL;
    return false;
@@ -170,11 +177,30 @@ static const char *dinput_joypad_name(unsigned pad)
    return NULL;
 }
 
+static int32_t dinput_joypad_vid(unsigned pad)
+{
+    return g_pads[pad].vid;
+}
+
+static int32_t dinput_joypad_pid(unsigned pad)
+{
+    return g_pads[pad].pid;
+}
+
+static const char *dinput_joypad_friendly_name(unsigned pad)
+{
+   if (pad < MAX_USERS)
+      return g_pads[pad].joy_friendly_name;
+
+   return NULL;
+}
+
 static BOOL CALLBACK enum_joypad_cb(const DIDEVICEINSTANCE *inst, void *p)
 {
+#ifdef HAVE_XINPUT
    bool is_xinput_pad;
+#endif
    LPDIRECTINPUTDEVICE8 *pad = NULL;
-   driver_t *driver     = driver_get_ptr();
    settings_t *settings = config_get_ptr();
 
    (void)p;
@@ -192,17 +218,27 @@ static BOOL CALLBACK enum_joypad_cb(const DIDEVICEINSTANCE *inst, void *p)
                g_dinput_ctx, &inst->guidInstance, pad, NULL)))
 #endif
    return DIENUM_CONTINUE;
-   
+
    g_pads[g_joypad_cnt].joy_name = strdup(inst->tszProductName);
-   
-#ifdef HAVE_XINPUT
+   g_pads[g_joypad_cnt].joy_friendly_name = strdup(inst->tszInstanceName);
+
+   /* there may be more useful info in the GUID so leave this here for a while */
 #if 0
-   is_xinput_pad = g_xinput_block_pads 
-      && name_is_xinput_pad(inst->tszProductName);
+   printf("Guid = {%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX}\n",
+   inst->guidProduct.Data1, inst->guidProduct.Data2, inst->guidProduct.Data3,
+   inst->guidProduct.Data4[0], inst->guidProduct.Data4[1], inst->guidProduct.Data4[2], inst->guidProduct.Data4[3],
+   inst->guidProduct.Data4[4], inst->guidProduct.Data4[5], inst->guidProduct.Data4[6], inst->guidProduct.Data4[7]);
 #endif
-   is_xinput_pad = g_xinput_block_pads 
+
+   g_pads[g_joypad_cnt].vid = inst->guidProduct.Data1 % 0x10000;
+   g_pads[g_joypad_cnt].pid = inst->guidProduct.Data1 / 0x10000;
+
+   RARCH_LOG("Device #%u PID: {%04lX} VID:{%04lX}\n", g_joypad_cnt, g_pads[g_joypad_cnt].pid, g_pads[g_joypad_cnt].vid);
+
+#ifdef HAVE_XINPUT
+   is_xinput_pad = g_xinput_block_pads
       && guid_is_xinput_device(&inst->guidProduct);
-   
+
    if (is_xinput_pad)
    {
       if (g_last_xinput_pad_idx < 4)
@@ -212,12 +248,12 @@ static BOOL CALLBACK enum_joypad_cb(const DIDEVICEINSTANCE *inst, void *p)
 #endif
 
    IDirectInputDevice8_SetDataFormat(*pad, &c_dfDIJoystick2);
-   IDirectInputDevice8_SetCooperativeLevel(*pad, (HWND)driver->video_window,
+   IDirectInputDevice8_SetCooperativeLevel(*pad, (HWND)video_driver_window_get(),
          DISCL_NONEXCLUSIVE | DISCL_BACKGROUND);
 
-   IDirectInputDevice8_EnumObjects(*pad, enum_axes_cb, 
+   IDirectInputDevice8_EnumObjects(*pad, enum_axes_cb,
          *pad, DIDFT_ABSAXIS);
-         
+
 #ifdef HAVE_XINPUT
    if (!is_xinput_pad)
 #endif
@@ -228,31 +264,40 @@ static BOOL CALLBACK enum_joypad_cb(const DIDEVICEINSTANCE *inst, void *p)
             dinput_joypad_name(g_joypad_cnt),
             sizeof(settings->input.device_names[g_joypad_cnt]));
 
-      /* TODO - implement VID/PID? */
       params.idx = g_joypad_cnt;
       strlcpy(params.name, dinput_joypad_name(g_joypad_cnt), sizeof(params.name));
+      strlcpy(params.display_name, dinput_joypad_friendly_name(g_joypad_cnt), sizeof(params.driver));
       strlcpy(params.driver, dinput_joypad.ident, sizeof(params.driver));
+      params.vid = dinput_joypad_vid(g_joypad_cnt);
+      params.pid = dinput_joypad_pid(g_joypad_cnt);
       input_config_autoconfigure_joypad(&params);
+      settings->input.pid[g_joypad_cnt] = params.pid;
+      settings->input.vid[g_joypad_cnt] = params.vid;
    }
 
+#ifdef HAVE_XINPUT
 enum_iteration_done:
+#endif
    g_joypad_cnt++;
-   return DIENUM_CONTINUE; 
+   return DIENUM_CONTINUE;
 }
 
-static bool dinput_joypad_init(void)
+static bool dinput_joypad_init(void *data)
 {
    unsigned i;
 
+   (void)data;
+
    if (!dinput_init_context())
       return false;
-   
+
    g_last_xinput_pad_idx = 0;
-   
+
    for (i = 0; i < MAX_USERS; ++i)
    {
       g_xinput_pad_indexes[i] = -1;
       g_pads[i].joy_name = NULL;
+      g_pads[i].joy_friendly_name = NULL;
    }
 
    RARCH_LOG("Enumerating DInput joypads ...\n");
@@ -278,7 +323,7 @@ static bool dinput_joypad_button(unsigned port_num, uint16_t joykey)
    {
       unsigned pov;
       unsigned hat   = GET_HAT(joykey);
-      unsigned elems = sizeof(pad->joy_state.rgdwPOV) / 
+      unsigned elems = sizeof(pad->joy_state.rgdwPOV) /
          sizeof(pad->joy_state.rgdwPOV[0]);
 
       if (hat >= elems)
@@ -306,7 +351,7 @@ static bool dinput_joypad_button(unsigned port_num, uint16_t joykey)
    }
    else
    {
-      unsigned elems = sizeof(pad->joy_state.rgbButtons) / 
+      unsigned elems = sizeof(pad->joy_state.rgbButtons) /
          sizeof(pad->joy_state.rgbButtons[0]);
 
       if (joykey < elems)
@@ -331,12 +376,12 @@ static int16_t dinput_joypad_axis(unsigned port_num, uint32_t joyaxis)
    if (!pad->joypad)
       return 0;
 
-   if (AXIS_NEG_GET(joyaxis) <= 5)
+   if (AXIS_NEG_GET(joyaxis) <= 7)
    {
       axis = AXIS_NEG_GET(joyaxis);
       is_neg = true;
    }
-   else if (AXIS_POS_GET(joyaxis) <= 5)
+   else if (AXIS_POS_GET(joyaxis) <= 7)
    {
       axis = AXIS_POS_GET(joyaxis);
       is_pos = true;
@@ -361,6 +406,12 @@ static int16_t dinput_joypad_axis(unsigned port_num, uint32_t joyaxis)
          break;
       case 5:
          val = pad->joy_state.lRz;
+         break;
+      case 6:
+         val = pad->joy_state.rglSlider[0];
+         break;
+      case 7:
+         val = pad->joy_state.rglSlider[1];
          break;
    }
 

@@ -18,7 +18,6 @@
 #ifndef CORE_INFO_H_
 #define CORE_INFO_H_
 
-#include <file/config_file.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -38,7 +37,7 @@ typedef struct
 typedef struct
 {
    char *path;
-   config_file_t *data;
+   void *config_data;
    char *display_name;
    char *core_name;
    char *system_manufacturer;
@@ -71,7 +70,7 @@ typedef struct
    char *all_ext;
 } core_info_list_t;
 
-core_info_list_t *core_info_list_new(const char *modules_path);
+core_info_list_t *core_info_list_new(void);
 void core_info_list_free(core_info_list_t *list);
 
 size_t core_info_list_num_info_files(core_info_list_t *list);
@@ -99,10 +98,19 @@ void core_info_list_update_missing_firmware(core_info_list_t *list,
 bool core_info_list_get_info(core_info_list_t *list,
       core_info_t *info, const char *path);
 
-const char *core_info_list_get_all_extensions(core_info_list_t *list);
+const char *core_info_list_get_all_extensions(void);
+
+core_info_t *core_info_find(core_info_list_t *list,
+      const char *core);
 
 bool core_info_list_get_display_name(core_info_list_t *list,
       const char *path, char *buf, size_t size);
+
+bool core_info_get_display_name(const char *path, char *s, size_t len);
+
+void core_info_get_name(const char *path, char *s, size_t len);
+
+core_info_t *core_info_get(core_info_list_t *list, size_t i);
 
 #ifdef __cplusplus
 }

@@ -14,23 +14,52 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "x11_common.h"
 #include <stdlib.h>
 #include <string.h>
-#include <X11/Xatom.h>
 #include <math.h>
+
 #include <sys/types.h>
 #include <sys/wait.h>
-#include "../../general.h"
+
+#include <X11/Xatom.h>
+
+#include "x11_common.h"
+#include "../../input/common/input_x11_common.h"
+#include "../../configuration.h"
+#include "../../verbosity.h"
+#include "../../runloop.h"
+
+Colormap g_x11_cmap;
+Window   g_x11_win;
+Display *g_x11_dpy;
+
+static Atom XA_NET_WM_STATE;
+static Atom XA_NET_WM_STATE_FULLSCREEN;
+static Atom XA_NET_MOVERESIZE_WINDOW;
+
+static Atom g_x11_quit_atom;
+static volatile sig_atomic_t g_x11_quit;
+static bool g_x11_has_focus;
+static XIM g_x11_xim;
+static XIC g_x11_xic;
+static bool g_x11_true_full;
+
+unsigned g_x11_screen;
+
+#define XA_INIT(x) XA##x = XInternAtom(dpy, #x, False)
+#define _NET_WM_STATE_ADD 1
+#define MOVERESIZE_GRAVITY_CENTER 5
+#define MOVERESIZE_X_SHIFT 8
+#define MOVERESIZE_Y_SHIFT 9
 
 static void x11_hide_mouse(Display *dpy, Window win)
 {
    static char bm_no_data[] = {0, 0, 0, 0, 0, 0, 0, 0};
-
    Cursor no_ptr;
    Pixmap bm_no;
    XColor black, dummy;
    Colormap colormap = DefaultColormap(dpy, DefaultScreen(dpy));
+
    if (!XAllocNamedColor(dpy, colormap, "black", &black, &dummy))
       return;
 
@@ -54,22 +83,12 @@ void x11_show_mouse(Display *dpy, Window win, bool state)
       x11_hide_mouse(dpy, win);
 }
 
-static Atom XA_NET_WM_STATE;
-static Atom XA_NET_WM_STATE_FULLSCREEN;
-static Atom XA_NET_MOVERESIZE_WINDOW;
-
-#define XA_INIT(x) XA##x = XInternAtom(dpy, #x, False)
-#define _NET_WM_STATE_ADD 1
-#define MOVERESIZE_GRAVITY_CENTER 5
-#define MOVERESIZE_X_SHIFT 8
-#define MOVERESIZE_Y_SHIFT 9
-
 void x11_windowed_fullscreen(Display *dpy, Window win)
 {
+   XEvent xev = {0};
+
    XA_INIT(_NET_WM_STATE);
    XA_INIT(_NET_WM_STATE_FULLSCREEN);
-
-   XEvent xev = {0};
 
    xev.xclient.type = ClientMessage;
    xev.xclient.send_event = True;
@@ -124,7 +143,7 @@ void x11_set_window_attr(Display *dpy, Window win)
 void x11_suspend_screensaver(Window wnd)
 {
    int ret;
-   char cmd[64];
+   char cmd[64] = {0};
 
    RARCH_LOG("Suspending screensaver (X11).\n");
 
@@ -294,6 +313,8 @@ unsigned x11_get_xinerama_monitor(Display *dpy, int x, int y,
 
 bool x11_create_input_context(Display *dpy, Window win, XIM *xim, XIC *xic)
 {
+   g_x11_has_focus = true;
+
    *xim = XOpenIM(dpy, NULL, NULL, NULL);
 
    if (!*xim)
@@ -363,4 +384,234 @@ bool x11_get_metrics(void *data,
    }
 
    return true;
+}
+
+bool x11_alive(void *data)
+{
+   XEvent event;
+
+   while (XPending(g_x11_dpy))
+   {
+      bool filter;
+
+      /* Can get events from older windows. Check this. */
+      XNextEvent(g_x11_dpy, &event);
+      filter = XFilterEvent(&event, g_x11_win);
+
+      switch (event.type)
+      {
+         case ClientMessage:
+            if (event.xclient.window == g_x11_win && 
+                  (Atom)event.xclient.data.l[0] == g_x11_quit_atom)
+               g_x11_quit = true;
+            break;
+
+         case DestroyNotify:
+            if (event.xdestroywindow.window == g_x11_win)
+               g_x11_quit = true;
+            break;
+
+         case MapNotify:
+            if (event.xmap.window == g_x11_win)
+               g_x11_has_focus = true;
+            break;
+
+         case UnmapNotify:
+            if (event.xunmap.window == g_x11_win)
+               g_x11_has_focus = false;
+            break;
+
+         case ButtonPress:
+            x_input_poll_wheel(&event.xbutton, true);
+            break;
+
+         case ButtonRelease:
+            break;
+
+         case KeyPress:
+         case KeyRelease:
+            if (event.xkey.window == g_x11_win)
+               x11_handle_key_event(&event, g_x11_xic, filter);
+            break;
+      }
+   }
+
+   return !g_x11_quit;
+}
+
+void x11_check_window(void *data, bool *quit,
+   bool *resize, unsigned *width, unsigned *height, unsigned frame_count)
+{
+   unsigned new_width  = *width;
+   unsigned new_height = *height;
+
+   x11_get_video_size(data, &new_width, &new_height);
+
+   if (new_width != *width || new_height != *height)
+   {
+      *resize = true;
+      *width  = new_width;
+      *height = new_height;
+   }
+
+   x11_alive(data);
+
+   *quit = g_x11_quit;
+}
+
+void x11_get_video_size(void *data, unsigned *width, unsigned *height)
+{
+   if (!g_x11_dpy || g_x11_win == None)
+   {
+      Display *dpy = (Display*)XOpenDisplay(NULL);
+      *width  = 0;
+      *height = 0;
+
+      if (dpy)
+      {
+         int screen = DefaultScreen(dpy);
+         *width  = DisplayWidth(dpy, screen);
+         *height = DisplayHeight(dpy, screen);
+         XCloseDisplay(dpy);
+      }
+   }
+   else
+   {
+      XWindowAttributes target;
+      XGetWindowAttributes(g_x11_dpy, g_x11_win, &target);
+
+      *width  = target.width;
+      *height = target.height;
+   }
+}
+
+bool x11_has_focus_internal(void *data)
+{
+   return g_x11_has_focus;
+}
+
+bool x11_has_focus(void *data)
+{
+   Window win;
+   int rev;
+
+   XGetInputFocus(g_x11_dpy, &win, &rev);
+
+   return (win == g_x11_win && g_x11_has_focus) || g_x11_true_full;
+}
+
+static void x11_sighandler(int sig)
+{
+   (void)sig;
+   g_x11_quit = 1;
+}
+
+void x11_install_sighandlers(void)
+{
+   struct sigaction sa = {{0}};
+
+   sa.sa_handler = x11_sighandler;
+   sa.sa_flags   = SA_RESTART;
+   sigemptyset(&sa.sa_mask);
+   sigaction(SIGINT, &sa, NULL);
+   sigaction(SIGTERM, &sa, NULL);
+}
+
+bool x11_connect(void)
+{
+   g_x11_quit = 0;
+
+   /* Keep one g_x11_dpy alive the entire process lifetime.
+    * This is necessary for nVidia's EGL implementation for now. */
+   if (!g_x11_dpy)
+   {
+      g_x11_dpy = XOpenDisplay(NULL);
+      if (!g_x11_dpy)
+         return false;
+   }
+
+   return true;
+}
+
+void x11_update_window_title(void *data)
+{
+   char buf[128]           = {0};
+   char buf_fps[128]       = {0};
+   settings_t *settings    = config_get_ptr();
+
+   if (video_monitor_get_fps(buf, sizeof(buf),
+            buf_fps, sizeof(buf_fps)))
+      XStoreName(g_x11_dpy, g_x11_win, buf);
+   if (settings->fps_show)
+      runloop_msg_queue_push(buf_fps, 1, 1, false);
+}
+
+bool x11_input_ctx_new(bool true_full)
+{
+   if (!x11_create_input_context(g_x11_dpy, g_x11_win, &g_x11_xim, &g_x11_xic))
+      return false;
+
+   video_driver_display_type_set(RARCH_DISPLAY_X11);
+   video_driver_display_set((uintptr_t)g_x11_dpy);
+   video_driver_window_set((uintptr_t)g_x11_win);
+   g_x11_true_full       = true_full;
+   return true;
+}
+
+void x11_input_ctx_destroy(void)
+{
+   x11_destroy_input_context(&g_x11_xim, &g_x11_xic);
+}
+
+void x11_window_destroy(bool fullscreen)
+{
+   if (g_x11_win)
+      XUnmapWindow(g_x11_dpy, g_x11_win);
+   if (!fullscreen)
+      XDestroyWindow(g_x11_dpy, g_x11_win);
+   g_x11_win = None;
+}
+
+void x11_colormap_destroy(void)
+{
+   if (!g_x11_cmap)
+      return;
+
+   XFreeColormap(g_x11_dpy, g_x11_cmap);
+   g_x11_cmap = None;
+}
+
+void x11_install_quit_atom(void)
+{
+   g_x11_quit_atom = XInternAtom(g_x11_dpy, "WM_DELETE_WINDOW", False);
+   if (g_x11_quit_atom)
+      XSetWMProtocols(g_x11_dpy, g_x11_win, &g_x11_quit_atom, 1);
+}
+
+static Bool x11_wait_notify(Display *d, XEvent *e, char *arg)
+{
+   return e->type == MapNotify && e->xmap.window == g_x11_win;
+}
+
+void x11_event_queue_check(XEvent *event)
+{
+   XIfEvent(g_x11_dpy, event, x11_wait_notify, NULL);
+}
+
+void x11_save_last_used_monitor(Window win)
+{
+#ifdef HAVE_XINERAMA
+   XWindowAttributes target;
+   Window child;
+   int x = 0, y = 0;
+
+   XGetWindowAttributes(g_x11_dpy, g_x11_win, &target);
+   XTranslateCoordinates(g_x11_dpy, g_x11_win, DefaultRootWindow(g_x11_dpy),
+         target.x, target.y, &x, &y, &child);
+
+   g_x11_screen = x11_get_xinerama_monitor(g_x11_dpy, x, y,
+         target.width, target.height);
+
+   RARCH_LOG("[X11]: Saved monitor #%u.\n", g_x11_screen);
+#endif
 }

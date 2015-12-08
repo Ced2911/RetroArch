@@ -23,7 +23,7 @@
 #include "../common/win32_common.h"
 
 #include "../../runloop.h"
-#include "../video_monitor.h"
+#include "../../verbosity.h"
 
 #ifdef _MSC_VER
 #ifndef _XBOX
@@ -45,9 +45,8 @@
 static bool widescreen_mode = false;
 #endif
 
-static d3d_video_t *curD3D = NULL;
-static bool d3d_quit = false;
-static void *dinput;
+void *curD3D = NULL;
+void *dinput;
 
 extern bool d3d_restore(d3d_video_t *data);
 
@@ -64,61 +63,12 @@ static void d3d_resize(void *data, unsigned new_width, unsigned new_height)
    if (new_width != d3d->video_info.width || new_height != d3d->video_info.height)
    {
       RARCH_LOG("[D3D]: Resize %ux%u.\n", new_width, new_height);
-      d3d->video_info.width  = d3d->screen_width = new_width;
-      d3d->video_info.height = d3d->screen_height = new_height;
+      d3d->video_info.width  = new_width;
+      d3d->video_info.height = new_height;
+      video_driver_set_size(&new_width, &new_height);
       d3d_restore(d3d);
    }
 }
-
-#ifdef HAVE_WINDOW
-LRESULT CALLBACK WindowProc(HWND hWnd, UINT message,
-      WPARAM wParam, LPARAM lParam)
-{
-   driver_t *driver     = driver_get_ptr();
-   settings_t *settings = config_get_ptr();
-
-   switch (message)
-   {
-      case WM_CREATE:
-         {
-            LPCREATESTRUCT p_cs   = (LPCREATESTRUCT)lParam;
-            curD3D                = (d3d_video_t*)p_cs->lpCreateParams;
-         }
-         break;
-      case WM_CHAR:
-      case WM_KEYDOWN:
-      case WM_KEYUP:
-      case WM_SYSKEYUP:
-      case WM_SYSKEYDOWN:
-         return win32_handle_keyboard_event(hWnd, message, wParam, lParam);
-
-      case WM_DESTROY:
-         d3d_quit = true;
-         return 0;
-      case WM_SIZE:
-         {
-            unsigned new_width  = LOWORD(lParam);
-            unsigned new_height = HIWORD(lParam);
-
-            if (new_width && new_height)
-               d3d_resize(driver->video_data, new_width, new_height);
-         }
-         return 0;
-      case WM_COMMAND:
-         if (settings->ui.menubar_enable)
-         {
-            d3d_video_t *d3d = (d3d_video_t*)driver->video_data;
-            HWND        d3dr = d3d->hWnd;
-            LRESULT      ret = win32_menu_loop(d3dr, wParam);
-         }
-         break;
-   }
-
-   if (dinput_handle_message(dinput, message, wParam, lParam))
-      return 0;
-   return DefWindowProc(hWnd, message, wParam, lParam);
-}
-#endif
 
 static void gfx_ctx_d3d_swap_buffers(void *data)
 {
@@ -130,29 +80,31 @@ static void gfx_ctx_d3d_swap_buffers(void *data)
 
 static void gfx_ctx_d3d_update_title(void *data)
 {
-   char buf[128], buffer_fps[128];
-   d3d_video_t *d3d     = (d3d_video_t*)data;
+   char buf[128]        = {0};
+   char buffer_fps[128] = {0};
    settings_t *settings = config_get_ptr();
+   HWND         window  = win32_get_window();
 
    if (video_monitor_get_fps(buf, sizeof(buf),
             buffer_fps, sizeof(buffer_fps)))
    {
 #ifndef _XBOX
-      SetWindowText(d3d->hWnd, buf);
+      SetWindowText(window, buf);
 #endif
    }
 
    if (settings->fps_show)
    {
 #ifdef _XBOX
-      char mem[128];
       MEMORYSTATUS stat;
+      char mem[128] = {0};
+
       GlobalMemoryStatus(&stat);
       snprintf(mem, sizeof(mem), "|| MEM: %.2f/%.2fMB",
             stat.dwAvailPhys/(1024.0f*1024.0f), stat.dwTotalPhys/(1024.0f*1024.0f));
       strlcat(buffer_fps, mem, sizeof(buffer_fps));
 #endif
-      rarch_main_msg_queue_push(buffer_fps, 1, 1, false);
+      runloop_msg_queue_push(buffer_fps, 1, 1, false);
    }
 }
 
@@ -167,44 +119,17 @@ static void gfx_ctx_d3d_check_window(void *data, bool *quit,
       bool *resize, unsigned *width,
       unsigned *height, unsigned frame_count)
 {
-   d3d_video_t *d3d = (d3d_video_t*)data;
-
-   (void)data;
-
-   *quit = false;
-   *resize = false;
-
-   if (d3d_quit)
-      *quit = true;
-   if (d3d->should_resize)
-      *resize = true;
-
-   win32_check_window();
+   win32_check_window(quit, resize, width, height);
 }
-
-#ifdef _XBOX
-static HANDLE GetFocus(void)
-{
-   driver_t *driver = driver_get_ptr();
-   d3d_video_t *d3d = (d3d_video_t*)driver->video_data;
-   return d3d->hWnd;
-}
-#endif
 
 static bool gfx_ctx_d3d_has_focus(void *data)
 {
-   d3d_video_t *d3d = (d3d_video_t*)data;
-   if (!d3d)
-      return false;
-   return GetFocus() == d3d->hWnd;
+   return win32_has_focus();
 }
 
 static bool gfx_ctx_d3d_suppress_screensaver(void *data, bool enable)
 {
-   (void)data;
-   (void)enable;
-
-   return false;
+   return win32_suppress_screensaver(data, enable);
 }
 
 static bool gfx_ctx_d3d_has_windowed(void *data)
@@ -238,7 +163,7 @@ static bool gfx_ctx_d3d_init(void *data)
 {
    (void)data;
 
-   d3d_quit = false;
+   win32_monitor_init();
 
    return true;
 }
@@ -263,12 +188,21 @@ static void gfx_ctx_d3d_input_driver(void *data,
    (void)data;
 }
 
+static bool gfx_ctx_d3d_set_video_mode(void *data,
+      unsigned width, unsigned height,
+      bool fullscreen)
+{
+   win32_show_cursor(!fullscreen);
+
+   return true;
+}
+
 static void gfx_ctx_d3d_get_video_size(void *data,
       unsigned *width, unsigned *height)
 {
+#ifdef _XBOX
    d3d_video_t *d3d = (d3d_video_t*)data;
 
-#ifdef _XBOX
    (void)width;
    (void)height;
 #if defined(_XBOX360)
@@ -361,11 +295,10 @@ static void gfx_ctx_d3d_swap_interval(void *data, unsigned interval)
 {
    d3d_video_t      *d3d = (d3d_video_t*)data;
 #ifdef _XBOX
-   LPDIRECT3DDEVICE d3dr = (LPDIRECT3DDEVICE)d3d->dev;
    unsigned d3d_interval = interval ? 
       D3DPRESENT_INTERVAL_ONE : D3DPRESENT_INTERVAL_IMMEDIATE;
 
-   d3dr->SetRenderState(XBOX_PRESENTATIONINTERVAL, d3d_interval);
+   d3d_set_render_state(d3d->dev, XBOX_PRESENTATIONINTERVAL, d3d_interval);
 #else
    d3d_restore(d3d);
 #endif
@@ -382,7 +315,7 @@ const gfx_ctx_driver_t gfx_ctx_d3d = {
    gfx_ctx_d3d_destroy,
    gfx_ctx_d3d_bind_api,
    gfx_ctx_d3d_swap_interval,
-   NULL,
+   gfx_ctx_d3d_set_video_mode,
    gfx_ctx_d3d_get_video_size,
    NULL, /* get_video_output_size */
    NULL, /* get_video_output_prev */

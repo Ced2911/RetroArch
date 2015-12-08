@@ -20,57 +20,80 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <file/file_path.h>
+
 #include <stdlib.h>
 #include <boolean.h>
 #include <string.h>
 #include <time.h>
 #include <errno.h>
-#include <compat/strl.h>
-#include <compat/posix_string.h>
-#include <retro_miscellaneous.h>
 
 #ifdef __HAIKU__
 #include <kernel/image.h>
 #endif
 
-#if (defined(__CELLOS_LV2__) && !defined(__PSL1GHT__)) || defined(__QNX__) || defined(PSP)
-#include <unistd.h> /* stat() is defined here */
-#endif
-
-#if defined(__CELLOS_LV2__)
-
-#ifndef S_ISDIR
-#define S_ISDIR(x) (x & 0040000)
-#endif
-
-#endif
-
-#if defined(_WIN32)
-#ifdef _MSC_VER
-#define setmode _setmode
-#endif
-#ifdef _XBOX
-#include <xtl.h>
-#define INVALID_FILE_ATTRIBUTES -1
-#else
-#include <io.h>
-#include <fcntl.h>
-#include <direct.h>
-#include <windows.h>
-#endif
-#else
-#include <sys/types.h>
 #include <sys/stat.h>
-#include <dirent.h>
-#include <unistd.h>
+
+#include <file/file_path.h>
+
+#ifndef __MACH__
+#include <compat/strl.h>
+#include <compat/posix_string.h>
 #endif
+#include <retro_assert.h>
+#include <retro_stat.h>
+#include <retro_miscellaneous.h>
+
+/**
+ * path_mkdir:
+ * @dir                : directory
+ *
+ * Create directory on filesystem.
+ *
+ * Returns: true (1) if directory could be created, otherwise false (0).
+ **/
+bool path_mkdir(const char *dir)
+{
+   const char *target = NULL;
+   /* Use heap. Real chance of stack overflow if we recurse too hard. */
+   char     *basedir = strdup(dir);
+   bool          ret = false;
+
+   if (!basedir)
+      return false;
+
+   path_parent_dir(basedir);
+   if (!*basedir || !strcmp(basedir, dir))
+      goto end;
+
+   if (path_is_directory(basedir))
+   {
+      target = dir;
+      ret    = mkdir_norecurse(dir);
+   }
+   else
+   {
+      target = basedir;
+      ret    = path_mkdir(basedir);
+
+      if (ret)
+      {
+         target = dir;
+         ret    = mkdir_norecurse(dir);
+      }
+   }
+
+end:
+   if (target && !ret)
+      printf("Failed to create directory: \"%s\".\n", target);
+   free(basedir);
+   return ret;
+}
 
 /**
  * path_get_extension:
  * @path               : path
  *
- * Gets extension of file. Only '.'s 
+ * Gets extension of file. Only '.'s
  * after the last slash are considered.
  *
  * Returns: extension part from the path.
@@ -96,6 +119,8 @@ const char *path_get_extension(const char *path)
 char *path_remove_extension(char *path)
 {
    char *last = (char*)strrchr(path_basename(path), '.');
+   if (!last)
+      return NULL;
    if (*last)
       *last = '\0';
    return last;
@@ -130,41 +155,21 @@ bool path_contains_compressed_file(const char *path)
  **/
 bool path_is_compressed_file(const char* path)
 {
-#ifdef HAVE_COMPRESSION
-   const char* file_ext = path_get_extension(path);
-#ifdef HAVE_7ZIP
-   if (strcmp(file_ext,"7z") == 0)
+#if defined(HAVE_COMPRESSION) && (defined(HAVE_ZLIB) || defined(HAVE_7ZIP))
+   const char* file_ext   = path_get_extension(path);
+
+#ifdef HAVE_ZLIB
+   if (!strcmp(file_ext, "zip"))
       return true;
 #endif
-#ifdef HAVE_ZLIB
-   if (strcmp(file_ext,"zip") == 0)
+
+#ifdef HAVE_7ZIP
+   if (!strcmp(file_ext, "7z"))
       return true;
 #endif
 
 #endif
    return false;
-}
-
-/**
- * path_is_directory:
- * @path               : path
- *
- * Checks if path is a directory.
- *
- * Returns: true (1) if path is a directory, otherwise false (0).
- */
-bool path_is_directory(const char *path)
-{
-#ifdef _WIN32
-   DWORD ret = GetFileAttributes(path);
-   return (ret & FILE_ATTRIBUTE_DIRECTORY) && (ret != INVALID_FILE_ATTRIBUTES);
-#else
-   struct stat buf;
-   if (stat(path, &buf) < 0)
-      return false;
-
-   return S_ISDIR(buf.st_mode);
-#endif
 }
 
 /**
@@ -190,7 +195,7 @@ bool path_file_exists(const char *path)
  * fill_pathname:
  * @out_path           : output path
  * @in_path            : input  path
- * @replace            : what to replace 
+ * @replace            : what to replace
  * @size               : buffer size of output path
  *
  * FIXME: Verify
@@ -202,31 +207,31 @@ bool path_file_exists(const char *path)
  * Only '.'s after the last slash are considered as extensions.
  * If no '.' is present, in_path and replace will simply be concatenated.
  * 'size' is buffer size of 'out_path'.
- * E.g.: in_path = "/foo/bar/baz/boo.c", replace = ".asm" => 
- * out_path = "/foo/bar/baz/boo.asm" 
+ * E.g.: in_path = "/foo/bar/baz/boo.c", replace = ".asm" =>
+ * out_path = "/foo/bar/baz/boo.asm"
  * E.g.: in_path = "/foo/bar/baz/boo.c", replace = ""     =>
- * out_path = "/foo/bar/baz/boo" 
+ * out_path = "/foo/bar/baz/boo"
  */
 void fill_pathname(char *out_path, const char *in_path,
       const char *replace, size_t size)
 {
-   char tmp_path[PATH_MAX_LENGTH];
-   char *tok;
+   char tmp_path[PATH_MAX_LENGTH] = {0};
+   char *tok                      = NULL;
 
-   rarch_assert(strlcpy(tmp_path, in_path,
+   retro_assert(strlcpy(tmp_path, in_path,
             sizeof(tmp_path)) < sizeof(tmp_path));
    if ((tok = (char*)strrchr(path_basename(tmp_path), '.')))
       *tok = '\0';
 
-   rarch_assert(strlcpy(out_path, tmp_path, size) < size);
-   rarch_assert(strlcat(out_path, replace, size) < size);
+   retro_assert(strlcpy(out_path, tmp_path, size) < size);
+   retro_assert(strlcat(out_path, replace, size) < size);
 }
 
 /**
  * fill_pathname_noext:
  * @out_path           : output path
  * @in_path            : input  path
- * @replace            : what to replace 
+ * @replace            : what to replace
  * @size               : buffer size of output path
  *
  * Appends a filename extension 'replace' to 'in_path', and outputs
@@ -239,8 +244,8 @@ void fill_pathname(char *out_path, const char *in_path,
 void fill_pathname_noext(char *out_path, const char *in_path,
       const char *replace, size_t size)
 {
-   rarch_assert(strlcpy(out_path, in_path, size) < size);
-   rarch_assert(strlcat(out_path, replace, size) < size);
+   retro_assert(strlcpy(out_path, in_path, size) < size);
+   retro_assert(strlcat(out_path, replace, size) < size);
 }
 
 static char *find_last_slash(const char *str)
@@ -256,7 +261,7 @@ static char *find_last_slash(const char *str)
    return (char*)slash;
 }
 
-/** 
+/**
  * fill_pathname_slash:
  * @path               : path
  * @size               : size of path
@@ -272,11 +277,12 @@ void fill_pathname_slash(char *path, size_t size)
    /* Try to preserve slash type. */
    if (last_slash && (last_slash != (path + path_len - 1)))
    {
-      char join_str[2] = {*last_slash};
-      rarch_assert(strlcat(path, join_str, size) < size);
+      char join_str[2];
+      strlcpy(join_str, last_slash, sizeof(join_str));
+      retro_assert(strlcat(path, join_str, size) < size);
    }
    else if (!last_slash)
-      rarch_assert(strlcat(path, path_default_slash(), size) < size);
+      retro_assert(strlcat(path, path_default_slash(), size) < size);
 }
 
 /**
@@ -300,15 +306,16 @@ void fill_pathname_dir(char *in_dir, const char *in_basename,
       const char *replace, size_t size)
 {
    const char *base = NULL;
+
    fill_pathname_slash(in_dir, size);
    base = path_basename(in_basename);
-   rarch_assert(strlcat(in_dir, base, size) < size);
-   rarch_assert(strlcat(in_dir, replace, size) < size);
+   retro_assert(strlcat(in_dir, base, size) < size);
+   retro_assert(strlcat(in_dir, replace, size) < size);
 }
 
 /**
  * fill_pathname_base:
- * @out                : output path         
+ * @out                : output path
  * @in_path            : input path
  * @size               : size of output path
  *
@@ -316,7 +323,10 @@ void fill_pathname_dir(char *in_dir, const char *in_basename,
  **/
 void fill_pathname_base(char *out, const char *in_path, size_t size)
 {
-   const char *ptr = find_last_slash(in_path);
+   const char *ptr_bak = NULL;
+   const char     *ptr = find_last_slash(in_path);
+
+   (void)ptr_bak;
 
    if (ptr)
       ptr++;
@@ -330,21 +340,20 @@ void fill_pathname_base(char *out, const char *in_path, size_t size)
     *   /path/to/archive.7z#folder/mygame.img
     *   basename would be mygame.img in both cases
     */
-
-   const char *ptr_bak = ptr;
-   ptr = strchr(ptr_bak,'#');
+   ptr_bak = ptr;
+   ptr     = strchr(ptr_bak,'#');
    if (ptr)
       ptr++;
    else
       ptr = ptr_bak;
 #endif
 
-   rarch_assert(strlcpy(out, ptr, size) < size);
+   retro_assert(strlcpy(out, ptr, size) < size);
 }
 
 /**
  * fill_pathname_basedir:
- * @out_dir            : output directory        
+ * @out_dir            : output directory
  * @in_path            : input path
  * @size               : size of output directory
  *
@@ -355,13 +364,14 @@ void fill_pathname_base(char *out, const char *in_path, size_t size)
 void fill_pathname_basedir(char *out_dir,
       const char *in_path, size_t size)
 {
-   rarch_assert(strlcpy(out_dir, in_path, size) < size);
+   if (out_dir != in_path)
+      retro_assert(strlcpy(out_dir, in_path, size) < size);
    path_basedir(out_dir);
 }
 
 /**
  * fill_pathname_parent_dir:
- * @out_dir            : output directory        
+ * @out_dir            : output directory
  * @in_dir             : input directory
  * @size               : size of output directory
  *
@@ -371,7 +381,8 @@ void fill_pathname_basedir(char *out_dir,
 void fill_pathname_parent_dir(char *out_dir,
       const char *in_dir, size_t size)
 {
-   rarch_assert(strlcpy(out_dir, in_dir, size) < size);
+   if (out_dir != in_dir)
+      retro_assert(strlcpy(out_dir, in_dir, size) < size);
    path_parent_dir(out_dir);
 }
 
@@ -381,10 +392,10 @@ void fill_pathname_parent_dir(char *out_dir,
  * @ext                : extension of output filename
  * @size               : buffer size of output filename
  *
- * Creates a 'dated' filename prefixed by 'RetroArch', and 
+ * Creates a 'dated' filename prefixed by 'RetroArch', and
  * concatenates extension (@ext) to it.
  *
- * E.g.: 
+ * E.g.:
  * out_filename = "RetroArch-{month}{day}-{Hours}{Minutes}.{@ext}"
  **/
 void fill_dated_filename(char *out_filename,
@@ -400,7 +411,7 @@ void fill_dated_filename(char *out_filename,
 
 /**
  * path_basedir:
- * @path               : path           
+ * @path               : path
  *
  * Extracts base directory by mutating path.
  * Keeps trailing '/'.
@@ -451,11 +462,15 @@ void path_parent_dir(char *path)
  **/
 const char *path_basename(const char *path)
 {
+   const char *last_hash = NULL;
    const char *last = find_last_slash(path);
+
+   (void)last_hash;
 
 #ifdef HAVE_COMPRESSION
    /* We cut either at the last hash or the last slash; whichever comes last */
-   const char *last_hash = strchr(path,'#');
+   last_hash = strchr(path,'#');
+
    if (last_hash > last)
       return last_hash + 1;
 #endif
@@ -475,13 +490,15 @@ const char *path_basename(const char *path)
  **/
 bool path_is_absolute(const char *path)
 {
+   if (path[0] == '/')
+      return true;
 #ifdef _WIN32
    /* Many roads lead to Rome ... */
-   return path[0] == '/' || (strstr(path, "\\\\") == path)
-      || strstr(path, ":/") || strstr(path, ":\\") || strstr(path, ":\\\\");
-#else
-   return path[0] == '/';
+   if ((strstr(path, "\\\\") == path)
+         || strstr(path, ":/") || strstr(path, ":\\") || strstr(path, ":\\\\"))
+      return true;
 #endif
+   return false;
 }
 
 /**
@@ -496,13 +513,14 @@ void path_resolve_realpath(char *buf, size_t size)
 {
 #ifndef RARCH_CONSOLE
    char tmp[PATH_MAX_LENGTH];
+
    strlcpy(tmp, buf, sizeof(tmp));
 
 #ifdef _WIN32
    if (!_fullpath(buf, tmp, size))
       strlcpy(buf, tmp, size);
 #else
-   rarch_assert(size >= PATH_MAX_LENGTH);
+   retro_assert(size >= PATH_MAX_LENGTH);
 
    /* NOTE: realpath() expects at least PATH_MAX_LENGTH bytes in buf.
     * Technically, PATH_MAX_LENGTH needn't be defined, but we rely on it anyways.
@@ -511,85 +529,7 @@ void path_resolve_realpath(char *buf, size_t size)
    if (!realpath(tmp, buf))
       strlcpy(buf, tmp, size);
 #endif
-
-#else
-   (void)buf;
-   (void)size;
 #endif
-}
-
-/**
- * path_mkdir_norecurse:
- * @dir                : directory
- *
- * Create directory on filesystem.
- *
- * Returns: true (1) if directory could be created, otherwise false (0).
- **/
-static bool path_mkdir_norecurse(const char *dir)
-{
-   int ret;
-#if defined(_WIN32)
-   ret = _mkdir(dir);
-#elif defined(IOS)
-   ret = mkdir(dir, 0755);
-#else
-   ret = mkdir(dir, 0750);
-#endif
-   /* Don't treat this as an error. */
-   if (ret < 0 && errno == EEXIST && path_is_directory(dir))
-      ret = 0;
-   if (ret < 0)
-      printf("mkdir(%s) error: %s.\n", dir, strerror(errno));
-   return ret == 0;
-}
-
-/**
- * path_mkdir:
- * @dir                : directory
- *
- * Create directory on filesystem.
- *
- * Returns: true (1) if directory could be created, otherwise false (0).
- **/
-bool path_mkdir(const char *dir)
-{
-   const char *target = NULL;
-   /* Use heap. Real chance of stack overflow if we recurse too hard. */
-   char *basedir = strdup(dir);
-   bool ret = true;
-
-   if (!basedir)
-      return false;
-
-   path_parent_dir(basedir);
-   if (!*basedir || !strcmp(basedir, dir))
-   {
-      ret = false;
-      goto end;
-   }
-
-   if (path_is_directory(basedir))
-   {
-      target = dir;
-      ret = path_mkdir_norecurse(dir);
-   }
-   else
-   {
-      target = basedir;
-      ret = path_mkdir(basedir);
-      if (ret)
-      {
-         target = dir;
-         ret = path_mkdir_norecurse(dir);
-      }
-   }
-
-end:
-   if (target && !ret)
-      printf("Failed to create directory: \"%s\".\n", target);
-   free(basedir);
-   return ret;
 }
 
 /**
@@ -608,58 +548,60 @@ void fill_pathname_resolve_relative(char *out_path,
       const char *in_refpath, const char *in_path, size_t size)
 {
    if (path_is_absolute(in_path))
-      rarch_assert(strlcpy(out_path, in_path, size) < size);
-   else
    {
-      rarch_assert(strlcpy(out_path, in_refpath, size) < size);
-      path_basedir(out_path);
-      rarch_assert(strlcat(out_path, in_path, size) < size);
+      retro_assert(strlcpy(out_path, in_path, size) < size);
+      return;
    }
+
+   retro_assert(strlcpy(out_path, in_refpath, size) < size);
+   path_basedir(out_path);
+   retro_assert(strlcat(out_path, in_path, size) < size);
 }
 
 /**
  * fill_pathname_join:
  * @out_path           : output path
- * @dir                : directory   
+ * @dir                : directory
  * @path               : path
  * @size               : size of output path
  *
  * Joins a directory (@dir) and path (@path) together.
- * Makes sure not to get  two consecutive slashes 
+ * Makes sure not to get  two consecutive slashes
  * between directory and path.
  **/
 void fill_pathname_join(char *out_path,
       const char *dir, const char *path, size_t size)
 {
-   rarch_assert(strlcpy(out_path, dir, size) < size);
+   if (out_path != dir)
+      retro_assert(strlcpy(out_path, dir, size) < size);
 
    if (*out_path)
       fill_pathname_slash(out_path, size);
 
-   rarch_assert(strlcat(out_path, path, size) < size);
+   retro_assert(strlcat(out_path, path, size) < size);
 }
 
 /**
  * fill_pathname_join_delim:
  * @out_path           : output path
- * @dir                : directory   
+ * @dir                : directory
  * @path               : path
- * @delim              : delimiter 
+ * @delim              : delimiter
  * @size               : size of output path
  *
- * Joins a directory (@dir) and path (@path) together 
+ * Joins a directory (@dir) and path (@path) together
  * using the given delimiter (@delim).
  **/
 void fill_pathname_join_delim(char *out_path, const char *dir,
       const char *path, const char delim, size_t size)
 {
    size_t copied = strlcpy(out_path, dir, size);
-   rarch_assert(copied < size+1);
+   retro_assert(copied < size+1);
 
-   out_path[copied]=delim;
+   out_path[copied]   = delim;
    out_path[copied+1] = '\0';
 
-   rarch_assert(strlcat(out_path, path, size) < size);
+   retro_assert(strlcat(out_path, path, size) < size);
 }
 
 /**
@@ -680,23 +622,25 @@ void fill_pathname_join_delim(char *out_path, const char *dir,
 void fill_short_pathname_representation(char* out_rep,
       const char *in_path, size_t size)
 {
-   char path_short[PATH_MAX_LENGTH], *last_hash = NULL;
+   char path_short[PATH_MAX_LENGTH] = {0};
+   char *last_hash                  = NULL;
+
    fill_pathname(path_short, path_basename(in_path), "",
             sizeof(path_short));
 
    last_hash = (char*)strchr(path_short,'#');
-   /* We handle paths like:
-    * /path/to/file.7z#mygame.img
-    * short_name: mygame.img:
-    */
    if(last_hash != NULL)
    {
-      /* We check whether something is actually 
+      /* We handle paths like:
+       * /path/to/file.7z#mygame.img
+       * short_name: mygame.img:
+       *
+       * We check whether something is actually
        * after the hash to avoid going over the buffer.
        */
-      rarch_assert(strlen(last_hash) > 1);
-      strlcpy(out_rep,last_hash + 1, size);
+      retro_assert(strlen(last_hash) > 1);
+      strlcpy(out_rep, last_hash + 1, size);
    }
    else
-      strlcpy(out_rep,path_short, size);
+      strlcpy(out_rep, path_short, size);
 }

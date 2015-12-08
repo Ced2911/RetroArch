@@ -14,65 +14,83 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef __DRIVER__H
-#define __DRIVER__H
+#ifndef __RARCH_DRIVER__H
+#define __RARCH_DRIVER__H
 
-#include <sys/types.h>
-#include <boolean.h>
-#include "libretro_private.h"
-#include <stdlib.h>
 #include <stdint.h>
+#include <stdlib.h>
+
+#include <boolean.h>
 #include <compat/posix_string.h>
-
-#include <retro_miscellaneous.h>
-
-#include "frontend/frontend_driver.h"
-#include "ui/ui_companion_driver.h"
-#include "gfx/video_driver.h"
-#include "audio/audio_driver.h"
-
-#include "menu/menu_driver.h"
-#include "camera/camera_driver.h"
-#include "location/location_driver.h"
-#include "audio/audio_resampler_driver.h"
-#include "record/record_driver.h"
-
-#include "libretro_version_1.h"
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
-#endif
-
-#ifdef HAVE_COMMAND
-#include "command.h"
 #endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define AUDIO_CHUNK_SIZE_BLOCKING 512
+#define AUDIO_CHUNK_SIZE_BLOCKING      512
 
 /* So we don't get complete line-noise when fast-forwarding audio. */
-#define AUDIO_CHUNK_SIZE_NONBLOCKING 2048
+#define AUDIO_CHUNK_SIZE_NONBLOCKING   2048
 
-#define AUDIO_MAX_RATIO 16
+#define AUDIO_MAX_RATIO                16
+
+/* Specialized _MOUSE that targets the full screen regardless of viewport.
+ */
+#define RARCH_DEVICE_MOUSE_SCREEN      (RETRO_DEVICE_MOUSE | 0x10000)
 
 /* Specialized _POINTER that targets the full screen regardless of viewport.
  * Should not be used by a libretro implementation as coordinates returned
  * make no sense.
  *
  * It is only used internally for overlays. */
-#define RARCH_DEVICE_POINTER_SCREEN (RETRO_DEVICE_POINTER | 0x10000)
+#define RARCH_DEVICE_POINTER_SCREEN    (RETRO_DEVICE_POINTER | 0x10000)
 
-#define RARCH_DEVICE_ID_POINTER_BACK (RETRO_DEVICE_ID_POINTER_PRESSED | 0x10000)
+#define RARCH_DEVICE_ID_POINTER_BACK   (RETRO_DEVICE_ID_POINTER_PRESSED | 0x10000)
 
 /* libretro has 16 buttons from 0-15 (libretro.h)
  * Analog binds use RETRO_DEVICE_ANALOG, but we follow the same scheme
  * internally in RetroArch for simplicity, so they are mapped into [16, 23].
  */
-#define RARCH_FIRST_CUSTOM_BIND 16
-#define RARCH_FIRST_META_KEY RARCH_CUSTOM_BIND_LIST_END
+#define RARCH_FIRST_CUSTOM_BIND        16
+#define RARCH_FIRST_META_KEY           RARCH_CUSTOM_BIND_LIST_END
+
+#define AXIS_NEG(x)        (((uint32_t)(x) << 16) | UINT16_C(0xFFFF))
+#define AXIS_POS(x)        ((uint32_t)(x) | UINT32_C(0xFFFF0000))
+#define AXIS_NONE          UINT32_C(0xFFFFFFFF)
+#define AXIS_DIR_NONE      UINT16_C(0xFFFF)
+
+#define AXIS_NEG_GET(x)    (((uint32_t)(x) >> 16) & UINT16_C(0xFFFF))
+#define AXIS_POS_GET(x)    ((uint32_t)(x) & UINT16_C(0xFFFF))
+
+#define NO_BTN             UINT16_C(0xFFFF)
+
+#define HAT_UP_SHIFT       15
+#define HAT_DOWN_SHIFT     14
+#define HAT_LEFT_SHIFT     13
+#define HAT_RIGHT_SHIFT    12
+#define HAT_UP_MASK        (1 << HAT_UP_SHIFT)
+#define HAT_DOWN_MASK      (1 << HAT_DOWN_SHIFT)
+#define HAT_LEFT_MASK      (1 << HAT_LEFT_SHIFT)
+#define HAT_RIGHT_MASK     (1 << HAT_RIGHT_SHIFT)
+#define HAT_MAP(x, hat)    ((x & ((1 << 12) - 1)) | hat)
+
+#define HAT_MASK           (HAT_UP_MASK | HAT_DOWN_MASK | HAT_LEFT_MASK | HAT_RIGHT_MASK)
+#define GET_HAT_DIR(x)     (x & HAT_MASK)
+#define GET_HAT(x)         (x & (~HAT_MASK))
+
+/* Drivers for EVENT_CMD_DRIVERS_DEINIT and EVENT_CMD_DRIVERS_INIT */
+#define DRIVERS_CMD_ALL \
+      ( DRIVER_AUDIO \
+      | DRIVER_VIDEO \
+      | DRIVER_INPUT \
+      | DRIVER_CAMERA \
+      | DRIVER_LOCATION \
+      | DRIVER_MENU \
+      | DRIVERS_VIDEO_INPUT )
 
 /* RetroArch specific bind IDs. */
 enum
@@ -134,30 +152,6 @@ enum
    RARCH_BIND_LIST_END_NULL
 };
 
-#define AXIS_NEG(x) (((uint32_t)(x) << 16) | UINT16_C(0xFFFF))
-#define AXIS_POS(x) ((uint32_t)(x) | UINT32_C(0xFFFF0000))
-#define AXIS_NONE UINT32_C(0xFFFFFFFF)
-#define AXIS_DIR_NONE UINT16_C(0xFFFF)
-
-#define AXIS_NEG_GET(x) (((uint32_t)(x) >> 16) & UINT16_C(0xFFFF))
-#define AXIS_POS_GET(x) ((uint32_t)(x) & UINT16_C(0xFFFF))
-
-#define NO_BTN UINT16_C(0xFFFF)
-
-#define HAT_UP_SHIFT 15
-#define HAT_DOWN_SHIFT 14
-#define HAT_LEFT_SHIFT 13
-#define HAT_RIGHT_SHIFT 12
-#define HAT_UP_MASK (1 << HAT_UP_SHIFT)
-#define HAT_DOWN_MASK (1 << HAT_DOWN_SHIFT)
-#define HAT_LEFT_MASK (1 << HAT_LEFT_SHIFT)
-#define HAT_RIGHT_MASK (1 << HAT_RIGHT_SHIFT)
-#define HAT_MAP(x, hat) ((x & ((1 << 12) - 1)) | hat)
-
-#define HAT_MASK (HAT_UP_MASK | HAT_DOWN_MASK | HAT_LEFT_MASK | HAT_RIGHT_MASK)
-#define GET_HAT_DIR(x) (x & HAT_MASK)
-#define GET_HAT(x) (x & (~HAT_MASK))
-
 enum analog_dpad_mode
 {
    ANALOG_DPAD_NONE = 0,
@@ -178,127 +172,21 @@ enum
    DRIVERS_VIDEO_INPUT = 1 << 6
 };
 
-/* Drivers for EVENT_CMD_DRIVERS_DEINIT and EVENT_CMD_DRIVERS_INIT */
-#define DRIVERS_CMD_ALL \
-      ( DRIVER_AUDIO \
-      | DRIVER_VIDEO \
-      | DRIVER_INPUT \
-      | DRIVER_CAMERA \
-      | DRIVER_LOCATION \
-      | DRIVER_MENU \
-      | DRIVERS_VIDEO_INPUT )
 
-typedef struct driver
-{
-   const frontend_ctx_driver_t *frontend_ctx;
-   const ui_companion_driver_t *ui_companion;
-   const audio_driver_t *audio;
-   const video_driver_t *video;
-   const void           *video_context;
-   const input_driver_t *input;
-   const camera_driver_t *camera;
-   const location_driver_t *location;
-   const rarch_resampler_t *resampler;
-   const record_driver_t *recording;
-   struct retro_callbacks retro_ctx;
+/* TODO/FIXME - comment needs to be moved to each respective driver */
 
-   void *audio_data;
-   void *video_data;
-   void *video_context_data;
-   void *video_shader_data;
-   void *input_data;
-   void *hid_data;
-   void *camera_data;
-   void *location_data;
-   void *resampler_data;
-   void *recording_data;
-   void *netplay_data;
-   void *ui_companion_data;
-
-   bool audio_active;
-   bool video_active;
-   bool camera_active;
-   bool location_active;
-   bool osk_enable;
-   bool keyboard_linefeed_enable;
-
-#ifdef HAVE_MENU
-   menu_handle_t *menu;
-   const menu_ctx_driver_t *menu_ctx;
-#endif
-   bool threaded_video;
-
-   /* If set during context deinit, the driver should keep
-    * graphics context alive to avoid having to reset all 
-    * context state. */
-   bool video_cache_context;
-
-   /* Set to true by driver if context caching succeeded. */
-   bool video_cache_context_ack;
-
-   /* Set this to true if the platform in question needs to 'own' 
-    * the respective handle and therefore skip regular RetroArch 
-    * driver teardown/reiniting procedure.
-    *
-    * If set to true, the 'free' function will get skipped. It is 
-    * then up to the driver implementation to properly handle 
-    * 'reiniting' inside the 'init' function and make sure it 
-    * returns the existing handle instead of allocating and 
-    * returning a pointer to a new handle.
-    *
-    * Typically, if a driver intends to make use of this, it should 
-    * set this to true at the end of its 'init' function. */
-   bool video_data_own;
-   bool audio_data_own;
-   bool input_data_own;
-   bool camera_data_own;
-   bool location_data_own;
-#ifdef HAVE_MENU
-   bool menu_data_own;
-#endif
-
-#ifdef HAVE_COMMAND
-   rarch_cmd_t *command;
-#endif
-   bool stdin_claimed;
-   bool block_hotkey;
-   bool block_input;
-   bool block_libretro_input;
-   bool flushing_input;
-   bool nonblock_state;
-
-   /* Opaque handles to currently running window.
-    * Used by e.g. input drivers which bind to a window.
-    * Drivers are responsible for setting these if an input driver
-    * could potentially make use of this. */
-   uintptr_t video_display;
-   uintptr_t video_window;
-   enum rarch_display_type display_type;
-
-   /* Used for 15-bit -> 16-bit conversions that take place before
-    * being passed to video driver. */
-   struct scaler_ctx scaler;
-   void *scaler_out;
-
-   /* Graphics driver requires RGBA byte order data (ABGR on little-endian)
-    * for 32-bit.
-    * This takes effect for overlay and shader cores that wants to load
-    * data into graphics driver. Kinda hackish to place it here, it is only
-    * used for GLES.
-    * TODO: Refactor this better. */
-   bool gfx_use_rgba;
-
-#ifdef HAVE_OVERLAY
-   input_overlay_t *overlay;
-   input_overlay_state_t overlay_state;
-#endif
-
-   /* Interface for "poking". */
-   const video_poke_interface_t *video_poke;
-
-   /* Last message given to the video driver */
-   const char *current_msg;
-} driver_t;
+/* Set this to true if the platform in question needs to 'own' 
+ * the respective handle and therefore skip regular RetroArch 
+ * driver teardown/reiniting procedure.
+ *
+ * If set to true, the 'free' function will get skipped. It is 
+ * then up to the driver implementation to properly handle 
+ * 'reiniting' inside the 'init' function and make sure it 
+ * returns the existing handle instead of allocating and 
+ * returning a pointer to a new handle.
+ *
+ * Typically, if a driver intends to make use of this, it should 
+ * set this to true at the end of its 'init' function. */
 
 /**
  * init_drivers:
@@ -328,42 +216,41 @@ void init_drivers_pre(void);
  **/
 void uninit_drivers(int flags);
 
-bool find_first_driver(const char *label, char *str, size_t sizeof_str);
+bool find_first_driver(const char *label, char *s, size_t len);
 
 /**
  * find_prev_driver:
  * @label              : string of driver type to be found.
- * @str                : identifier of driver to be found.
- * @sizeof_str         : size of @str.
+ * @s                  : identifier of driver to be found.
+ * @len                : size of @s.
  *
  * Find previous driver in driver array.
  *
  * Returns: true (1) if successful, otherwise false (0).
  **/
-bool find_prev_driver(const char *label, char *str, size_t sizeof_str);
+bool find_prev_driver(const char *label, char *s, size_t len);
 
 /**
  * find_next_driver:
  * @label              : string of driver type to be found.
- * @str                : identifier of driver to be found.
- * @sizeof_str         : size of @str.
+ * @s                  : identifier of driver to be found.
+ * @len                : size of @.
  *
  * Find next driver in driver array.
  *
  * Returns: true (1) if successful, otherwise false (0).
  **/
-bool find_next_driver(const char *label, char *str, size_t sizeof_str);
+bool find_next_driver(const char *label, char *s, size_t len);
 
 /**
  * driver_set_nonblock_state:
- * @enable             : Enable nonblock state?
  *
  * Sets audio and video drivers to nonblock state.
  *
- * If @enable is false, sets blocking state for both
+ * If nonblock state is false, sets blocking state for both
  * audio and video drivers instead.
  **/
-void driver_set_nonblock_state(bool enable);
+void driver_set_nonblock_state(void);
 
 /**
  * driver_set_refresh_rate:
@@ -385,7 +272,7 @@ void driver_set_refresh_rate(float hz);
  *
  * Returns: true (1) if successful, otherwise false (0).
  **/
-bool driver_update_system_av_info(const struct retro_system_av_info *info);
+bool driver_update_system_av_info(const void *data);
 
 /**
  * find_driver_index:
@@ -399,15 +286,10 @@ bool driver_update_system_av_info(const struct retro_system_av_info *info);
  **/
 int find_driver_index(const char * label, const char *drv);
 
-driver_t *driver_get_ptr(void);
-
 void driver_free(void);
 
-void driver_clear_state(void);
-  
 #ifdef __cplusplus
 }
 #endif
 
 #endif
-

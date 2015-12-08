@@ -22,8 +22,10 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <string/string_list.h>
 #include <string.h>
+
+#include <string/string_list.h>
+#include <retro_assert.h>
 #include <retro_miscellaneous.h>
 #include <compat/strl.h>
 #include <compat/posix_string.h>
@@ -58,13 +60,16 @@ void string_list_free(struct string_list *list)
 static bool string_list_capacity(struct string_list *list, size_t cap)
 {
    struct string_list_elem *new_data = NULL;
-   rarch_assert(cap > list->size);
+   retro_assert(cap > list->size);
 
    new_data = (struct string_list_elem*)
       realloc(list->elems, cap * sizeof(*new_data));
 
    if (!new_data)
       return false;
+
+   if (cap > list->cap)
+      memset(&new_data[list->cap], 0, sizeof(*new_data) * (cap - list->cap));
 
    list->elems = new_data;
    list->cap   = cap;
@@ -108,7 +113,8 @@ struct string_list *string_list_new(void)
 bool string_list_append(struct string_list *list, const char *elem,
       union string_list_elem_attr attr)
 {
-   char *data_dup;
+   char *data_dup = NULL;
+
    if (list->size >= list->cap &&
          !string_list_capacity(list, list->cap * 2))
       return false;
@@ -136,7 +142,7 @@ void string_list_set(struct string_list *list,
       unsigned idx, const char *str)
 {
    free(list->elems[idx].data);
-   rarch_assert(list->elems[idx].data = strdup(str));
+   retro_assert(list->elems[idx].data = strdup(str));
 }
 
 /**
@@ -154,9 +160,9 @@ void string_list_join_concat(char *buffer, size_t size,
 {
    size_t i, len = strlen(buffer);
 
-   rarch_assert(len < size);
+   retro_assert(len < size);
    buffer += len;
-   size -= len;
+   size   -= len;
 
    for (i = 0; i < list->size; i++)
    {
@@ -219,7 +225,7 @@ error:
  *
  * Returns: true (1) if element could be found, otherwise false (0).
  */
-bool string_list_find_elem(const struct string_list *list, const char *elem)
+int string_list_find_elem(const struct string_list *list, const char *elem)
 {
    size_t i;
 
@@ -229,7 +235,7 @@ bool string_list_find_elem(const struct string_list *list, const char *elem)
    for (i = 0; i < list->size; i++)
    {
       if (strcasecmp(list->elems[i].data, elem) == 0)
-         return true;
+         return i+1;
    }
 
    return false;
@@ -250,12 +256,13 @@ bool string_list_find_elem_prefix(const struct string_list *list,
       const char *prefix, const char *elem)
 {
    size_t i;
-   char prefixed[PATH_MAX_LENGTH];
+   char prefixed[PATH_MAX_LENGTH] = {0};
 
    if (!list)
       return false;
 
-   snprintf(prefixed, sizeof(prefixed), "%s%s", prefix, elem);
+   strlcpy(prefixed, prefix, sizeof(prefixed));
+   strlcat(prefixed, elem,   sizeof(prefixed));
 
    for (i = 0; i < list->size; i++)
    {

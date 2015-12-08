@@ -16,11 +16,12 @@
 
 #include "../../general.h"
 #include "../../driver.h"
-#include "../video_viewport.h"
 
 static void *null_gfx_init(const video_info_t *video,
       const input_driver_t **input, void **input_data)
 {
+   RARCH_ERR("Using the null video driver. RetroArch will not be visible.");
+
    *input = NULL;
    *input_data = NULL;
    (void)video;
@@ -29,7 +30,8 @@ static void *null_gfx_init(const video_info_t *video,
 }
 
 static bool null_gfx_frame(void *data, const void *frame,
-      unsigned width, unsigned height, unsigned pitch, const char *msg)
+      unsigned width, unsigned height, uint64_t frame_count,
+      unsigned pitch, const char *msg)
 {
    (void)data;
    (void)frame;
@@ -127,6 +129,7 @@ video_driver_t video_null = {
    null_gfx_set_shader,
    null_gfx_free,
    "null",
+   NULL, /* set_viewport */
    null_gfx_set_rotation,
    null_gfx_viewport_info,
    null_gfx_read_viewport,

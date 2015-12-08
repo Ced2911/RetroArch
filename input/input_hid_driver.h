@@ -46,6 +46,7 @@ struct hid_driver
 extern hid_driver_t iohidmanager_hid;
 extern hid_driver_t btstack_hid;
 extern hid_driver_t libusb_hid;
+extern hid_driver_t wiiusb_hid;
 extern hid_driver_t null_hid;
 
 /**
@@ -83,6 +84,8 @@ const char* config_get_hid_driver_options(void);
  * Returns: HID driver if found, otherwise NULL.
  **/
 const hid_driver_t *input_hid_init_first(void);
+
+const void *hid_driver_get_data(void);
 
 #ifdef __cplusplus
 }

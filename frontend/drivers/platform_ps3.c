@@ -14,12 +14,28 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdio.h>
+
+#include <sys/process.h>
+#include <sysutil/sysutil_common.h>
+#ifdef IS_SALAMANDER
+#include <netex/net.h>
+#include <np.h>
+#include <np/drm.h>
+#include <cell/sysmodule.h>
+#endif
+
 #include <sys/process.h>
 
-#include "../../ps3/sdk_defines.h"
-
-#include "../../general.h"
 #include <file/file_path.h>
+#ifndef IS_SALAMANDER
+#include <file/file_list.h>
+#endif
+
+#include "../frontend_driver.h"
+#include "../../defines/ps3_defines.h"
+#include "../../defaults.h"
+#include "../../verbosity.h"
 
 #define EMULATOR_CONTENT_DIR "SSNE10000"
 
@@ -39,14 +55,14 @@ SYS_PROCESS_PARAM(1001, 0x200000)
 static bool multiman_detected  = false;
 #endif
 
+#ifndef IS_SALAMANDER
 static bool exit_spawn = false;
 static bool exitspawn_start_game = false;
 
-#ifdef IS_SALAMANDER
-#include <netex/net.h>
-#include <np.h>
-#include <np/drm.h>
-#include <cell/sysmodule.h>
+static void frontend_ps3_shutdown(bool unused)
+{
+   sys_process_exit(0);
+}
 #endif
 
 #ifdef HAVE_SYSUTILS
@@ -64,8 +80,12 @@ static void callback_sysutil_exit(uint64_t status,
    {
       case CELL_SYSUTIL_REQUEST_EXITGAME:
          {
-            global_t *global = global_get_ptr();
-            global->system.shutdown = true;
+            frontend_ctx_driver_t *frontend = frontend_get_ptr();
+
+            if (frontend)
+               frontend->shutdown = frontend_ps3_shutdown;
+
+            runloop_ctl(RUNLOOP_CTL_SET_SHUTDOWN, NULL);
          }
          break;
    }
@@ -77,9 +97,9 @@ static void frontend_ps3_get_environment_settings(int *argc, char *argv[],
       void *args, void *params_data)
 {
 #ifndef IS_SALAMANDER
-   global_t *global = global_get_ptr();
-   bool original_verbose = global->verbosity;
-   global->verbosity = true;
+   bool *verbose         = retro_main_verbosity();
+   bool original_verbose = *verbose;
+   *verbose              = true;
 #endif
 
    (void)args;
@@ -87,7 +107,7 @@ static void frontend_ps3_get_environment_settings(int *argc, char *argv[],
 #if defined(HAVE_LOGGER)
    logger_init();
 #elif defined(HAVE_FILE_LOGGER)
-   global->log_file = fopen("/retroarch-log.txt", "w");
+   retro_main_log_file_init("/retroarch-log.txt");
 #endif
 #endif
 
@@ -95,14 +115,13 @@ static void frontend_ps3_get_environment_settings(int *argc, char *argv[],
    unsigned int get_type;
    unsigned int get_attributes;
    CellGameContentSize size;
-   char dirName[CELL_GAME_DIRNAME_SIZE];
-   char contentInfoPath[PATH_MAX_LENGTH];
+   char dirName[CELL_GAME_DIRNAME_SIZE]  = {0};
 
 #ifdef HAVE_MULTIMAN
    /* not launched from external launcher, set default path */
    // second param is multiMAN SELF file
    if(path_file_exists(argv[2]) && *argc > 1
-         && (strcmp(argv[2], EMULATOR_CONTENT_DIR) == 0))
+         && (!strcmp(argv[2], EMULATOR_CONTENT_DIR)))
    {
       multiman_detected = true;
       RARCH_LOG("Started from multiMAN, auto-game start enabled.\n");
@@ -149,6 +168,8 @@ static void frontend_ps3_get_environment_settings(int *argc, char *argv[],
    }
    else
    {
+      char content_info_path[PATH_MAX_LENGTH] = {0};
+
       RARCH_LOG("cellGameBootCheck() OK.\n");
       RARCH_LOG("Directory name: [%s].\n", dirName);
       RARCH_LOG(" HDD Free Size (in KB) = [%d] Size (in KB) = [%d] System Size (in KB) = [%d].\n",
@@ -168,15 +189,15 @@ static void frontend_ps3_get_environment_settings(int *argc, char *argv[],
             == CELL_GAME_ATTRIBUTE_APP_HOME)
          RARCH_LOG("RetroArch was launched from host machine (APP_HOME).\n");
 
-      ret = cellGameContentPermit(contentInfoPath, g_defaults.port_dir);
+      ret = cellGameContentPermit(content_info_path, g_defaults.dir.port);
 
 #ifdef HAVE_MULTIMAN
       if (multiman_detected)
       {
-         fill_pathname_join(contentInfoPath, "/dev_hdd0/game/",
-               EMULATOR_CONTENT_DIR, sizeof(contentInfoPath));
-         fill_pathname_join(g_defaults.port_dir, contentInfoPath,
-               "USRDIR", sizeof(g_defaults.port_dir));
+         fill_pathname_join(content_info_path, "/dev_hdd0/game/",
+               EMULATOR_CONTENT_DIR, sizeof(content_info_path));
+         fill_pathname_join(g_defaults.dir.port, content_info_path,
+               "USRDIR", sizeof(g_defaults.dir.port));
       }
 #endif
 
@@ -185,34 +206,34 @@ static void frontend_ps3_get_environment_settings(int *argc, char *argv[],
       else
       {
          RARCH_LOG("cellGameContentPermit() OK.\n");
-         RARCH_LOG("contentInfoPath : [%s].\n", contentInfoPath);
-         RARCH_LOG("usrDirPath : [%s].\n", g_defaults.port_dir);
+         RARCH_LOG("content_info_path : [%s].\n", content_info_path);
+         RARCH_LOG("usrDirPath : [%s].\n", g_defaults.dir.port);
       }
 
-      fill_pathname_join(g_defaults.core_dir, g_defaults.port_dir,
-            "cores", sizeof(g_defaults.core_dir));
-      fill_pathname_join(g_defaults.core_info_dir, g_defaults.port_dir,
-            "cores", sizeof(g_defaults.core_info_dir));
-      fill_pathname_join(g_defaults.savestate_dir, g_defaults.core_dir,
-            "savestates", sizeof(g_defaults.savestate_dir));
-      fill_pathname_join(g_defaults.sram_dir, g_defaults.core_dir,
-            "savefiles", sizeof(g_defaults.sram_dir));
-      fill_pathname_join(g_defaults.system_dir, g_defaults.core_dir,
-            "system", sizeof(g_defaults.system_dir));
-      fill_pathname_join(g_defaults.shader_dir,  g_defaults.core_dir,
-            "shaders_cg", sizeof(g_defaults.shader_dir));
-      fill_pathname_join(g_defaults.config_path, g_defaults.port_dir,
-            "retroarch.cfg",  sizeof(g_defaults.config_path));
-      fill_pathname_join(g_defaults.overlay_dir, g_defaults.core_dir,
-            "overlays", sizeof(g_defaults.overlay_dir));
-      fill_pathname_join(g_defaults.assets_dir,   g_defaults.core_dir,
-            "media", sizeof(g_defaults.assets_dir));
-      fill_pathname_join(g_defaults.playlist_dir,   g_defaults.core_dir,
-            "playlists", sizeof(g_defaults.playlist_dir));
+      fill_pathname_join(g_defaults.dir.core, g_defaults.dir.port,
+            "cores", sizeof(g_defaults.dir.core));
+      fill_pathname_join(g_defaults.dir.core_info, g_defaults.dir.port,
+            "cores", sizeof(g_defaults.dir.core_info));
+      fill_pathname_join(g_defaults.dir.savestate, g_defaults.dir.core,
+            "savestates", sizeof(g_defaults.dir.savestate));
+      fill_pathname_join(g_defaults.dir.sram, g_defaults.dir.core,
+            "savefiles", sizeof(g_defaults.dir.sram));
+      fill_pathname_join(g_defaults.dir.system, g_defaults.dir.core,
+            "system", sizeof(g_defaults.dir.system));
+      fill_pathname_join(g_defaults.dir.shader,  g_defaults.dir.core,
+            "shaders_cg", sizeof(g_defaults.dir.shader));
+      fill_pathname_join(g_defaults.path.config, g_defaults.dir.port,
+            "retroarch.cfg",  sizeof(g_defaults.path.config));
+      fill_pathname_join(g_defaults.dir.overlay, g_defaults.dir.core,
+            "overlays", sizeof(g_defaults.dir.overlay));
+      fill_pathname_join(g_defaults.dir.assets,   g_defaults.dir.core,
+            "assets", sizeof(g_defaults.dir.assets));
+      fill_pathname_join(g_defaults.dir.playlist,   g_defaults.dir.core,
+            "playlists", sizeof(g_defaults.dir.playlist));
    }
 
 #ifndef IS_SALAMANDER
-   global->verbosity = original_verbose;
+   *verbose = original_verbose;
 #endif
 }
 
@@ -302,12 +323,84 @@ static void frontend_ps3_deinit(void *data)
 #endif
 }
 
-static void frontend_ps3_exec(const char *path, bool should_load_game);
-
+#ifndef IS_SALAMANDER
 static void frontend_ps3_set_fork(bool exit, bool start_game)
 {
    exit_spawn = exitspawn;
    exitspawn_start_game = start_game;
+}
+#endif
+
+static int frontend_ps3_exec_exitspawn(const char *path,
+      char const *argv[], char const *envp[])
+{
+   int ret;
+   unsigned i;
+   char spawn_data[256];
+   SceNpDrmKey *license_data = NULL;
+
+   for(i = 0; i < sizeof(spawn_data); ++i)
+      spawn_data[i] = i & 0xff;
+
+   ret = sceNpDrmProcessExitSpawn(license_data, path,
+         (const char** const)argv, envp, (sys_addr_t)spawn_data,
+         256, 1000, SYS_PROCESS_PRIMARY_STACK_SIZE_1M);
+
+   if(ret <  0)
+   {
+      RARCH_WARN("SELF file is not of NPDRM type, trying another approach to boot it...\n");
+      sys_game_process_exitspawn(path, (const char** const)argv,
+            envp, NULL, 0, 1000, SYS_PROCESS_PRIMARY_STACK_SIZE_1M);
+   }
+
+   return ret;
+}
+
+static void frontend_ps3_exec(const char *path, bool should_load_game)
+{
+#ifndef IS_SALAMANDER
+   char *fullpath        = NULL;
+   bool *verbose         = retro_main_verbosity();
+   bool original_verbose = *verbose;
+
+   *verbose              = true;
+#endif
+
+   (void)should_load_game;
+
+   RARCH_LOG("Attempt to load executable: [%s].\n", path);
+
+#ifndef IS_SALAMANDER
+   runloop_ctl(RUNLOOP_CTL_GET_CONTENT_PATH, &fullpath);
+
+   if (should_load_game && fullpath[0] != '\0')
+   {
+      char game_path[256];
+      strlcpy(game_path, fullpath, sizeof(game_path));
+
+      const char * const spawn_argv[] = {
+         game_path,
+         NULL
+      };
+
+      frontend_ps3_exec_exitspawn(path,
+            (const char** const)spawn_argv, NULL);
+   }
+   else
+#endif
+   {
+      frontend_ps3_exec_exitspawn(path,
+            NULL, NULL);
+   }
+
+   sceNpTerm();
+   sys_net_finalize_network();
+   cellSysmoduleUnloadModule(CELL_SYSMODULE_SYSUTIL_NP);
+   cellSysmoduleUnloadModule(CELL_SYSMODULE_NET);
+
+#ifndef IS_SALAMANDER
+   *verbose = original_verbose;
+#endif
 }
 
 static void frontend_ps3_exitspawn(char *core_path, size_t core_path_size)
@@ -316,14 +409,21 @@ static void frontend_ps3_exitspawn(char *core_path, size_t core_path_size)
    bool should_load_game = false;
 
 #ifndef IS_SALAMANDER
-   global_t *global = global_get_ptr();
-   bool original_verbose = global->verbosity;
-   global->verbosity = true;
+   bool *verbose         = retro_main_verbosity();
+   bool original_verbose = *verbose;
+
+   *verbose              = true;
 
    should_load_game = exitspawn_start_game;
 
    if (!exit_spawn)
+   {
+      frontend_ctx_driver_t *frontend = frontend_get_ptr();
+
+      if (frontend)
+         frontend->shutdown = frontend_ps3_shutdown;
       return;
+   }
 #endif
 
    frontend_ps3_exec(core_path, should_load_game);
@@ -332,105 +432,11 @@ static void frontend_ps3_exitspawn(char *core_path, size_t core_path_size)
    cellSysmoduleUnloadModule(CELL_SYSMODULE_SYSUTIL_GAME);
    cellSysmoduleLoadModule(CELL_SYSMODULE_FS);
    cellSysmoduleLoadModule(CELL_SYSMODULE_IO);
-#else
-
 #endif
 
 #ifndef IS_SALAMANDER
-   global->verbosity = original_verbose;
+   *verbose = original_verbose;
 #endif
-#endif
-}
-
-#include <stdio.h>
-
-#include <cell/sysmodule.h>
-#include <sys/process.h>
-#include <sysutil/sysutil_common.h>
-#include <netex/net.h>
-#include <np.h>
-#include <np/drm.h>
-
-#include "../../retroarch_logger.h"
-
-static void frontend_ps3_exec(const char *path, bool should_load_game)
-{
-   (void)should_load_game;
-   char spawn_data[256];
-#ifndef IS_SALAMANDER
-   global_t *global = global_get_ptr();
-   bool original_verbose = global->verbosity;
-   global->verbosity = true;
-
-   char game_path[256];
-   game_path[0] = '\0';
-#endif
-
-   RARCH_LOG("Attempt to load executable: [%s].\n", path);
-
-   for(unsigned int i = 0; i < sizeof(spawn_data); ++i)
-      spawn_data[i] = i & 0xff;
-
-   SceNpDrmKey * k_licensee = NULL;
-   int ret;
-#ifdef IS_SALAMANDER
-   const char * const spawn_argv[] = { NULL};
-
-   ret = sceNpDrmProcessExitSpawn2(k_licensee, path,
-         (const char** const)spawn_argv, NULL, (sys_addr_t)spawn_data,
-         256, 1000, SYS_PROCESS_PRIMARY_STACK_SIZE_1M);
-
-   if(ret <  0)
-   {
-      RARCH_WARN("SELF file is not of NPDRM type, trying another approach to boot it...\n");
-      sys_game_process_exitspawn(path, (const char** const)spawn_argv,
-            NULL, NULL, 0, 1000, SYS_PROCESS_PRIMARY_STACK_SIZE_1M);
-   }
-#else
-   if (should_load_game && global->fullpath[0] != '\0')
-   {
-      strlcpy(game_path, global->fullpath, sizeof(game_path));
-
-      const char * const spawn_argv[] = {
-         game_path,
-         NULL
-      };
-
-      ret = sceNpDrmProcessExitSpawn2(k_licensee, path,
-            (const char** const)spawn_argv, NULL,
-            (sys_addr_t)spawn_data, 256, 1000,
-            SYS_PROCESS_PRIMARY_STACK_SIZE_1M);
-
-      if(ret <  0)
-      {
-         RARCH_WARN("SELF file is not of NPDRM type, trying another approach to boot it...\n");
-         sys_game_process_exitspawn(path, (const char** const)spawn_argv,
-               NULL, NULL, 0, 1000, SYS_PROCESS_PRIMARY_STACK_SIZE_1M);
-      }
-   }
-   else
-   {
-      const char * const spawn_argv[] = {NULL}; 
-      ret = sceNpDrmProcessExitSpawn2(k_licensee, path,
-            (const char** const)spawn_argv, NULL, (sys_addr_t)spawn_data,
-            256, 1000, SYS_PROCESS_PRIMARY_STACK_SIZE_1M);
-
-      if(ret <  0)
-      {
-         RARCH_WARN("SELF file is not of NPDRM type, trying another approach to boot it...\n");
-         sys_game_process_exitspawn(path, (const char** const)spawn_argv,
-               NULL, NULL, 0, 1000, SYS_PROCESS_PRIMARY_STACK_SIZE_1M);
-      }
-   }
-#endif
-
-   sceNpTerm();
-   sys_net_finalize_network();
-   cellSysmoduleUnloadModule(CELL_SYSMODULE_SYSUTIL_NP);
-   cellSysmoduleUnloadModule(CELL_SYSMODULE_NET);
-
-#ifndef IS_SALAMANDER
-   global->verbosity = original_verbose;
 #endif
 }
 
@@ -444,14 +450,50 @@ enum frontend_architecture frontend_ps3_get_architecture(void)
    return FRONTEND_ARCH_PPC;
 }
 
-const frontend_ctx_driver_t frontend_ctx_ps3 = {
+static int frontend_ps3_parse_drive_list(void *data)
+{
+#ifndef IS_SALAMANDER
+   file_list_t *list = (file_list_t*)data;
+
+   menu_entries_push(list,
+         "/app_home/",   "", MENU_FILE_DIRECTORY, 0, 0);
+   menu_entries_push(list,
+         "/dev_hdd0/",   "", MENU_FILE_DIRECTORY, 0, 0);
+   menu_entries_push(list,
+         "/dev_hdd1/",   "", MENU_FILE_DIRECTORY, 0, 0);
+   menu_entries_push(list,
+         "/host_root/",  "", MENU_FILE_DIRECTORY, 0, 0);
+   menu_entries_push(list,
+         "/dev_usb000/", "", MENU_FILE_DIRECTORY, 0, 0);
+   menu_entries_push(list,
+         "/dev_usb001/", "", MENU_FILE_DIRECTORY, 0, 0);
+   menu_entries_push(list,
+         "/dev_usb002/", "", MENU_FILE_DIRECTORY, 0, 0);
+   menu_entries_push(list,
+         "/dev_usb003/", "", MENU_FILE_DIRECTORY, 0, 0);
+   menu_entries_push(list,
+         "/dev_usb004/", "", MENU_FILE_DIRECTORY, 0, 0);
+   menu_entries_push(list,
+         "/dev_usb005/", "", MENU_FILE_DIRECTORY, 0, 0);
+   menu_entries_push(list,
+         "/dev_usb006/", "", MENU_FILE_DIRECTORY, 0, 0);
+#endif
+
+   return 0;
+}
+
+frontend_ctx_driver_t frontend_ctx_ps3 = {
    frontend_ps3_get_environment_settings,
    frontend_ps3_init,
    frontend_ps3_deinit,
    frontend_ps3_exitspawn,
    NULL,                         /* process_args */
    frontend_ps3_exec,
+#ifdef IS_SALAMANDER
+   NULL,
+#else
    frontend_ps3_set_fork,
+#endif
    NULL,                         /* shutdown */
    NULL,                         /* get_name */
    NULL,                         /* get_os */
@@ -459,5 +501,6 @@ const frontend_ctx_driver_t frontend_ctx_ps3 = {
    NULL,                         /* load_content */
    frontend_ps3_get_architecture,
    NULL,                         /* get_powerstate */
+   frontend_ps3_parse_drive_list,
    "ps3",
 };

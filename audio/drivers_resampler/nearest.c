@@ -13,12 +13,11 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../audio_resampler_driver.h"
-#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <stdint.h>
+#include <math.h>
  
+#include "../audio_resampler_driver.h"
 typedef struct rarch_nearest_resampler
 {
    float fraction;
@@ -28,10 +27,10 @@ static void resampler_nearest_process(
       void *re_, struct resampler_data *data)
 {
    rarch_nearest_resampler_t *re = (rarch_nearest_resampler_t*)re_;
-   audio_frame_float_t *inp     = (audio_frame_float_t*)data->data_in;
-   audio_frame_float_t *inp_max = (audio_frame_float_t*)inp + data->input_frames;
-   audio_frame_float_t *outp    = (audio_frame_float_t*)data->data_out;
-   float ratio = 1.0 / data->ratio;
+   audio_frame_float_t  *inp     = (audio_frame_float_t*)data->data_in;
+   audio_frame_float_t  *inp_max = (audio_frame_float_t*)inp + data->input_frames;
+   audio_frame_float_t  *outp    = (audio_frame_float_t*)data->data_out;
+   float                   ratio = 1.0 / data->ratio;
  
    while(inp != inp_max)
    {

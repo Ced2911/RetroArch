@@ -20,12 +20,16 @@
 #include <stdint.h>
 #include <boolean.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum image_process_code
 {
    IMAGE_PROCESS_ERROR     = -2,
    IMAGE_PROCESS_ERROR_END = -1,
    IMAGE_PROCESS_NEXT      =  0,
-   IMAGE_PROCESS_END       =  1,
+   IMAGE_PROCESS_END       =  1
 };
 
 struct texture_image
@@ -41,7 +45,18 @@ struct texture_image
    uint32_t *pixels;
 };
 
+bool texture_image_set_color_shifts(unsigned *r_shift, unsigned *g_shift,
+      unsigned *b_shift, unsigned *a_shift);
+
+bool texture_image_color_convert(unsigned r_shift,
+      unsigned g_shift, unsigned b_shift, unsigned a_shift,
+      struct texture_image *out_img);
+
 bool texture_image_load(struct texture_image *img, const char *path);
 void texture_image_free(struct texture_image *img);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

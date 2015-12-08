@@ -13,23 +13,27 @@
  *  You should have received a copy of the GNU General Public License along with RetroArch.
  *  If not, see <http://www.gnu.org/licenses/>.
  */
-
-#include "../../driver.h"
-#include "../../general.h"
-#include <queues/fifo_buffer.h>
 #include <stdlib.h>
-#include <boolean.h>
-#include <pthread.h>
 
-#ifdef OSX
-#include <CoreAudio/CoreAudio.h>
-#else
+
+#if TARGET_OS_IPHONE
 #include <AudioToolbox/AudioToolbox.h>
+#else
+#include <CoreAudio/CoreAudio.h>
 #endif
 
 #include <CoreAudio/CoreAudioTypes.h>
 #include <AudioUnit/AudioUnit.h>
 #include <AudioUnit/AUComponent.h>
+
+#include <boolean.h>
+#include <queues/fifo_buffer.h>
+#include <rthreads/rthreads.h>
+#include <retro_endianness.h>
+
+#include "../audio_driver.h"
+#include "../../configuration.h"
+#include "../../verbosity.h"
 
 #if defined(__powerpc__) || defined(__ppc__) || defined(__POWERPC__)
 
@@ -41,8 +45,8 @@
 
 typedef struct coreaudio
 {
-   pthread_mutex_t lock;
-   pthread_cond_t cond;
+   slock_t *lock;
+   scond_t *cond;
 
 #ifdef OSX_PPC
    ComponentInstance dev;
@@ -79,8 +83,8 @@ static void coreaudio_free(void *data)
    if (dev->buffer)
       fifo_free(dev->buffer);
 
-   pthread_mutex_destroy(&dev->lock);
-   pthread_cond_destroy(&dev->cond);
+   slock_free(dev->lock);
+   scond_free(dev->cond);
 
    free(dev);
 }
@@ -106,7 +110,7 @@ static OSStatus audio_write_cb(void *userdata,
    write_avail = io_data->mBuffers[0].mDataByteSize;
    outbuf = io_data->mBuffers[0].mData;
 
-   pthread_mutex_lock(&dev->lock);
+   slock_lock(dev->lock);
 
    if (fifo_read_avail(dev->buffer) < write_avail)
    {
@@ -115,20 +119,26 @@ static OSStatus audio_write_cb(void *userdata,
       /* Seems to be needed. */
       memset(outbuf, 0, write_avail);
 
-      pthread_mutex_unlock(&dev->lock);
+      slock_unlock(dev->lock);
 
       /* Technically possible to deadlock without. */
-      pthread_cond_signal(&dev->cond); 
+      scond_signal(dev->cond); 
       return noErr;
    }
 
    fifo_read(dev->buffer, outbuf, write_avail);
-   pthread_mutex_unlock(&dev->lock);
-   pthread_cond_signal(&dev->cond);
+   slock_unlock(dev->lock);
+   scond_signal(dev->cond);
    return noErr;
 }
 
-#ifdef OSX
+#if TARGET_OS_IPHONE
+static void coreaudio_interrupt_listener(void *data, UInt32 interrupt_state)
+{
+    (void)data;
+    g_interrupted = (interrupt_state == kAudioSessionBeginInterruption);
+}
+#else
 static void choose_output_device(coreaudio_t *dev, const char* device)
 {
    unsigned i;
@@ -177,14 +187,6 @@ done:
 }
 #endif
 
-#ifdef IOS
-static void coreaudio_interrupt_listener(void *data, UInt32 interrupt_state)
-{
-   (void)data;
-   g_interrupted = (interrupt_state == kAudioSessionBeginInterruption);
-}
-#endif
-
 static void *coreaudio_init(const char *device,
       unsigned rate, unsigned latency)
 {
@@ -196,19 +198,20 @@ static void *coreaudio_init(const char *device,
 #else
    AudioComponent comp;
 #endif
-#ifndef IOS
-   AudioChannelLayout layout = {0};
+#ifndef TARGET_OS_IPHONE
+   AudioChannelLayout layout               = {0};
 #endif
-   AURenderCallbackStruct cb = {0};
+   AURenderCallbackStruct cb               = {0};
    AudioStreamBasicDescription stream_desc = {0};
-   static bool session_initialized = false;
-   coreaudio_t *dev = NULL;
+   bool component_unavailable              = false;
+   static bool session_initialized         = false;
+   coreaudio_t *dev                        = NULL;
 #ifdef OSX_PPC
-   ComponentDescription desc = {0};
+   ComponentDescription desc               = {0};
 #else
-   AudioComponentDescription desc = {0};
+   AudioComponentDescription desc          = {0};
 #endif
-   settings_t *settings = config_get_ptr();
+   settings_t *settings                    = config_get_ptr();
 
    (void)session_initialized;
    (void)device;
@@ -217,10 +220,10 @@ static void *coreaudio_init(const char *device,
    if (!dev)
       return NULL;
 
-   pthread_mutex_init(&dev->lock, NULL);
-   pthread_cond_init(&dev->cond, NULL);
+   dev->lock = slock_new();
+   dev->cond = scond_new();
 
-#ifdef IOS
+#if TARGET_OS_IPHONE
    if (!session_initialized)
    {
       session_initialized = true;
@@ -231,7 +234,7 @@ static void *coreaudio_init(const char *device,
 
    /* Create AudioComponent */
    desc.componentType = kAudioUnitType_Output;
-#ifdef IOS
+#if TARGET_OS_IPHONE
    desc.componentSubType = kAudioUnitSubType_RemoteIO;
 #else
    desc.componentSubType = kAudioUnitSubType_HALOutput;
@@ -247,13 +250,15 @@ static void *coreaudio_init(const char *device,
       goto error;
    
 #ifdef OSX_PPC
-   if (OpenAComponent(comp, &dev->dev) != noErr)
+   component_unavailable = (OpenAComponent(comp, &dev->dev) != noErr);
 #else
-   if (AudioComponentInstanceNew(comp, &dev->dev) != noErr)
+   component_unavailable = (AudioComponentInstanceNew(comp, &dev->dev) != noErr);
 #endif
+
+   if (component_unavailable)
       goto error;
 
-#ifdef OSX
+#if !TARGET_OS_IPHONE
    if (device)
       choose_output_device(dev, device);
 #endif
@@ -296,7 +301,7 @@ static void *coreaudio_init(const char *device,
    settings->audio.out_rate = real_desc.mSampleRate;
 
    /* Set channel layout (fails on iOS). */
-#ifndef IOS
+#ifndef TARGET_OS_IPHONE
    layout.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo;
    if (AudioUnitSetProperty(dev->dev, kAudioUnitProperty_AudioChannelLayout,
          kAudioUnitScope_Input, 0, &layout, sizeof(layout)) != noErr)
@@ -342,22 +347,11 @@ static ssize_t coreaudio_write(void *data, const void *buf_, size_t size)
    const uint8_t *buf = (const uint8_t*)buf_;
    size_t written = 0;
 
-#ifdef IOS
-   struct timespec timeout;
-   struct timeval time;
-
-   gettimeofday(&time, 0);
-   
-   memset(&timeout, 0, sizeof(timeout));
-   timeout.tv_sec = time.tv_sec + 3;
-   timeout.tv_nsec = time.tv_usec * 1000;
-#endif
-
    while (!g_interrupted && size > 0)
    {
       size_t write_avail;
 
-      pthread_mutex_lock(&dev->lock);
+      slock_lock(dev->lock);
 
       write_avail = fifo_write_avail(dev->buffer);
       if (write_avail > size)
@@ -370,19 +364,19 @@ static ssize_t coreaudio_write(void *data, const void *buf_, size_t size)
 
       if (dev->nonblock)
       {
-         pthread_mutex_unlock(&dev->lock);
+         slock_unlock(dev->lock);
          break;
       }
 
-#ifdef IOS
-      if (write_avail == 0 && pthread_cond_timedwait(
-               &dev->cond, &dev->lock, &timeout) == ETIMEDOUT)
+#if TARGET_OS_IPHONE
+      if (write_avail == 0 && !scond_wait_timeout(
+               dev->cond, dev->lock, 3000000))
          g_interrupted = true;
 #else
       if (write_avail == 0)
-         pthread_cond_wait(&dev->cond, &dev->lock);
+         scond_wait(dev->cond, dev->lock);
 #endif
-      pthread_mutex_unlock(&dev->lock);
+      slock_unlock(dev->lock);
    }
 
    return written;
@@ -432,9 +426,9 @@ static size_t coreaudio_write_avail(void *data)
    size_t avail;
    coreaudio_t *dev = (coreaudio_t*)data;
 
-   pthread_mutex_lock(&dev->lock);
+   slock_lock(dev->lock);
    avail = fifo_write_avail(dev->buffer);
-   pthread_mutex_unlock(&dev->lock);
+   slock_unlock(dev->lock);
 
    return avail;
 }

@@ -25,43 +25,72 @@
 #include "cocoa/cocoa_common.h"
 #include "../ui_companion_driver.h"
 #include "../../input/drivers/cocoa_input.h"
-#include "../../settings.h"
+#include "../../input/drivers_keyboard/keyboard_event_apple.h"
+#include "../../retroarch.h"
 
-#ifdef HAVE_MFI
-#include "../../input/drivers_hid/mfi_hid.h"
+#include "../../frontend/frontend.h"
+#include "../../runloop.h"
+
+#ifdef HAVE_MENU
+#include "../../menu/menu_setting.h"
 #endif
 
-#include "../../input/drivers_hid/btstack_hid.h"
-#include "../../frontend/frontend.h"
-
+static char msg_old[PATH_MAX_LENGTH];
 static id apple_platform;
 static CFRunLoopObserverRef iterate_observer;
 
 /* forward declaration */
 void apple_rarch_exited(void);
 
-static void rarch_draw(CFRunLoopObserverRef observer,
+static void rarch_enable_ui(void)
+{
+   bool boolean = true;
+
+   ui_companion_set_foreground(true);
+
+   runloop_ctl(RUNLOOP_CTL_SET_PAUSED, &boolean);
+   runloop_ctl(RUNLOOP_CTL_SET_IDLE,   &boolean);
+   rarch_ctl(RARCH_CTL_MENU_RUNNING, NULL);
+}
+
+static void rarch_disable_ui(void)
+{
+   bool boolean = false;
+
+   ui_companion_set_foreground(false);
+
+   runloop_ctl(RUNLOOP_CTL_SET_PAUSED, &boolean);
+   runloop_ctl(RUNLOOP_CTL_SET_IDLE,   &boolean);
+   rarch_ctl(RARCH_CTL_MENU_RUNNING_FINISHED, NULL);
+}
+
+static void ui_companion_cocoatouch_event_command(
+      void *data, enum event_command cmd)
+{
+    (void)data;
+    event_command(cmd);
+}
+
+static void rarch_draw_observer(CFRunLoopObserverRef observer,
     CFRunLoopActivity activity, void *info)
 {
-    runloop_t *runloop = rarch_main_get_ptr();
-    int ret            = 0;
-    bool iterate       = iterate_observer && !runloop->is_paused;
-    
-    if (!iterate)
-        return;
-    
-    ret                = rarch_main_iterate();
-    
-    if (ret == -1)
-    {
-        main_exit_save_config();
-        main_exit(NULL);
-        return;
-    }
-    
-    if (runloop->is_idle)
-        return;
-    CFRunLoopWakeUp(CFRunLoopGetMain());
+   unsigned sleep_ms  = 0;
+   int ret            = runloop_iterate(&sleep_ms);
+
+   if (ret == 1 && !ui_companion_is_on_foreground() && sleep_ms > 0)
+      retro_sleep(sleep_ms);
+   runloop_data_iterate();
+
+   if (ret == -1)
+   {
+      ui_companion_cocoatouch_event_command(NULL, EVENT_CMD_MENU_SAVE_CURRENT_CONFIG);
+      main_exit(NULL);
+      return;
+   }
+
+   if (runloop_ctl(RUNLOOP_CTL_IS_IDLE, NULL))
+      return;
+   CFRunLoopWakeUp(CFRunLoopGetMain());
 }
 
 apple_frontend_settings_t apple_frontend_settings;
@@ -82,8 +111,7 @@ extern float cocoagl_gfx_ctx_get_native_scale(void);
 static void handle_touch_event(NSArray* touches)
 {
    unsigned i;
-   driver_t *driver          = driver_get_ptr();
-   cocoa_input_data_t *apple = (cocoa_input_data_t*)driver->input_data;
+   cocoa_input_data_t *apple = (cocoa_input_data_t*)input_driver_get_data();
    float scale               = cocoagl_gfx_ctx_get_native_scale();
 
    if (!apple)
@@ -175,17 +203,17 @@ enum
          unsigned i;
          character = [ch characterAtIndex:0];
 
-         cocoa_input_keyboard_event(event._isKeyDown,
+         apple_input_keyboard_event(event._isKeyDown,
                (uint32_t)event._keyCode, 0, mod,
                RETRO_DEVICE_KEYBOARD);
          
          for (i = 1; i < ch.length; i++)
-            cocoa_input_keyboard_event(event._isKeyDown,
+            apple_input_keyboard_event(event._isKeyDown,
                   0, [ch characterAtIndex:i], mod,
                   RETRO_DEVICE_KEYBOARD);
       }
       
-      cocoa_input_keyboard_event(event._isKeyDown,
+      apple_input_keyboard_event(event._isKeyDown,
             (uint32_t)event._keyCode, character, mod,
             RETRO_DEVICE_KEYBOARD);
    }
@@ -219,8 +247,8 @@ enum
       switch (eventType)
       {
          case GSEVENT_TYPE_KEYDOWN:
-           case GSEVENT_TYPE_KEYUP:
-            cocoa_input_keyboard_event(eventType == GSEVENT_TYPE_KEYDOWN,
+         case GSEVENT_TYPE_KEYUP:
+            apple_input_keyboard_event(eventType == GSEVENT_TYPE_KEYDOWN,
                   *(uint16_t*)&eventMem[0x3C], 0, 0, RETRO_DEVICE_KEYBOARD);
             break;
       }
@@ -249,41 +277,24 @@ enum
    self.window      = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
    [self.window makeKeyAndVisible];
 
-   [self pushViewController:[RAMainMenu new] animated:YES];
+   self.mainmenu = [RAMainMenu new];
+   self.mainmenu.last_menu = self.mainmenu;
+   [self pushViewController:self.mainmenu animated:NO];
 
-   btpad_set_inquiry_state(false);
-    
    [self refreshSystemConfig];
    [self showGameView];
 
    if (rarch_main(0, NULL, NULL))
       apple_rarch_exited();
 
+  iterate_observer = CFRunLoopObserverCreate(0, kCFRunLoopBeforeWaiting,
+                                             true, 0, rarch_draw_observer, 0);
+  CFRunLoopAddObserver(CFRunLoopGetMain(), iterate_observer, kCFRunLoopCommonModes);
+    
 #ifdef HAVE_MFI
-   apple_gamecontroller_init();
+    extern bool apple_gamecontroller_joypad_init(void *data);
+    apple_gamecontroller_joypad_init(NULL);
 #endif
-
-   [self apple_start_iteration];
-}
-
-- (void) apple_start_iteration
-{
-    if (iterate_observer)
-        return;
-    
-    iterate_observer = CFRunLoopObserverCreate(0, kCFRunLoopBeforeWaiting,
-                                               true, 0, rarch_draw, 0);
-    CFRunLoopAddObserver(CFRunLoopGetMain(), iterate_observer, kCFRunLoopCommonModes);
-}
-
-- (void) apple_stop_iteration
-{
-    if (!iterate_observer)
-        return;
-    
-    CFRunLoopObserverInvalidate(iterate_observer);
-    CFRelease(iterate_observer);
-    iterate_observer = NULL;
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application
@@ -293,7 +304,9 @@ enum
 
 - (void)applicationWillTerminate:(UIApplication *)application
 {
-    [self apple_stop_iteration];
+   CFRunLoopObserverInvalidate(iterate_observer);
+   CFRelease(iterate_observer);
+   iterate_observer = NULL;
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application
@@ -310,7 +323,7 @@ enum
 {
    dispatch_async(dispatch_get_main_queue(),
                   ^{
-                      main_exit_save_config();
+                  ui_companion_cocoatouch_event_command(NULL, EVENT_CMD_MENU_SAVE_CURRENT_CONFIG);
                   });
    [self showPauseMenu: self];
 }
@@ -330,48 +343,36 @@ enum
 
 - (void)navigationController:(UINavigationController *)navigationController willShowViewController:(UIViewController *)viewController animated:(BOOL)animated
 {
-   cocoa_input_reset_icade_buttons();
    [self setToolbarHidden:![[viewController toolbarItems] count] animated:YES];
-   
    [self refreshSystemConfig];
 }
 
 - (void)showGameView
 {
-   runloop_t *runloop = rarch_main_get_ptr();
-
    [self popToRootViewControllerAnimated:NO];
    [self setToolbarHidden:true animated:NO];
    [[UIApplication sharedApplication] setStatusBarHidden:true withAnimation:UIStatusBarAnimationNone];
    [[UIApplication sharedApplication] setIdleTimerDisabled:true];
    [self.window setRootViewController:[CocoaView get]];
 
-   runloop->is_paused                     = false;
-   runloop->is_idle                       = false;
-   runloop->ui_companion_is_on_foreground = false;
+   ui_companion_cocoatouch_event_command(NULL, EVENT_CMD_AUDIO_START);
+   rarch_disable_ui();
 }
 
 - (IBAction)showPauseMenu:(id)sender
 {
-   runloop_t *runloop = rarch_main_get_ptr();
-    
-   if (runloop)
-   {
-       runloop->is_paused                     = true;
-       runloop->is_idle                       = true;
-       runloop->ui_companion_is_on_foreground = true;
-   }
+   ui_companion_cocoatouch_event_command(NULL, EVENT_CMD_AUDIO_STOP);
+   rarch_enable_ui();
 
    [[UIApplication sharedApplication] setStatusBarHidden:false withAnimation:UIStatusBarAnimationNone];
    [[UIApplication sharedApplication] setIdleTimerDisabled:false];
    [self.window setRootViewController:self];
 }
 
+
 - (void)toggleUI
 {
-   runloop_t *runloop = rarch_main_get_ptr();
-
-   if (runloop->ui_companion_is_on_foreground)
+   if (ui_companion_is_on_foreground())
    {
       [self showGameView];
    }
@@ -383,8 +384,6 @@ enum
 
 - (void)refreshSystemConfig
 {
-   bool small_keyboard, is_icade, is_btstack;
-    
    /* Get enabled orientations */
    apple_frontend_settings.orientation_flags = UIInterfaceOrientationMaskAll;
    
@@ -392,15 +391,36 @@ enum
       apple_frontend_settings.orientation_flags = UIInterfaceOrientationMaskLandscape;
    else if (!strcmp(apple_frontend_settings.orientations, "portrait"))
       apple_frontend_settings.orientation_flags = UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown;
+}
 
-   /* Set bluetooth mode */
-   small_keyboard = !(strcmp(apple_frontend_settings.bluetooth_mode, "small_keyboard"));
-   is_icade       = !(strcmp(apple_frontend_settings.bluetooth_mode, "icade"));
-   is_btstack     = !(strcmp(apple_frontend_settings.bluetooth_mode, "btstack"));
-       
-   cocoa_input_enable_small_keyboard(small_keyboard);
-   cocoa_input_enable_icade(is_icade);
-   btstack_set_poweron(is_btstack);
+- (void)mainMenuRefresh 
+{
+  [self.mainmenu reloadData];
+}
+
+- (void)mainMenuPushPop: (bool)pushp
+{
+  if ( pushp ) {
+    self.menu_count++;
+    RAMenuBase* next_menu = [RAMainMenu new];
+    next_menu.last_menu = self.mainmenu;
+    self.mainmenu = next_menu;
+    [self pushViewController:self.mainmenu animated:YES];
+  } else {
+    if ( self.menu_count == 0 ) {
+      [self.mainmenu reloadData];
+    } else {
+      self.menu_count--;
+
+      [self popViewControllerAnimated:YES];
+      self.mainmenu = self.mainmenu.last_menu;      
+    }
+  }
+}
+
+- (void)mainMenuRenderMessageBox:(NSString *)msg
+{
+  [self.mainmenu renderMessageBox:msg];
 }
 
 @end
@@ -429,7 +449,6 @@ void apple_rarch_exited(void)
     if (!ap)
         return;
     [ap showPauseMenu:ap];
-    btpad_set_inquiry_state(true);
 }
 
 typedef struct ui_companion_cocoatouch
@@ -437,27 +456,12 @@ typedef struct ui_companion_cocoatouch
    void *empty;
 } ui_companion_cocoatouch_t;
 
-static void ui_companion_cocoatouch_switch_to_ios(void *data)
-{
-   RetroArch_iOS *ap  = NULL;
-   runloop_t *runloop = rarch_main_get_ptr();
-    
-   (void)data;
-
-   if (!apple_platform)
-      return;
-    
-   ap = (RetroArch_iOS *)apple_platform;
-   runloop->is_idle = true;
-   [ap showPauseMenu:ap];
-}
-
 static void ui_companion_cocoatouch_notify_content_loaded(void *data)
 {
    RetroArch_iOS *ap = (RetroArch_iOS *)apple_platform;
-   
-    (void)data;
-    
+
+   (void)data;
+
    if (ap)
       [ap showGameView];
 }
@@ -474,9 +478,12 @@ static void ui_companion_cocoatouch_toggle(void *data)
 
 static int ui_companion_cocoatouch_iterate(void *data, unsigned action)
 {
-   (void)data;
+   RetroArch_iOS *ap  = (RetroArch_iOS*)apple_platform;
 
-   ui_companion_cocoatouch_switch_to_ios(data);
+   (void)data;
+    
+   if (ap)
+      [ap showPauseMenu:ap];
 
    return 0;
 }
@@ -498,15 +505,70 @@ static void *ui_companion_cocoatouch_init(void)
 
    if (!handle)
       return NULL;
+    
+   rarch_enable_ui();
 
    return handle;
 }
 
-static void ui_companion_cocoatouch_event_command(void *data,
-    enum event_command cmd)
+static size_t old_size = 0;
+
+static void ui_companion_cocoatouch_notify_list_pushed(void *data,
+   file_list_t *list, file_list_t *menu_list)
 {
-   (void)data;
-   event_command(cmd);
+   RetroArch_iOS *ap   = (RetroArch_iOS *)apple_platform;
+   bool pushp = false;
+
+   size_t new_size = file_list_get_size( menu_list );
+
+   /* FIXME workaround for the double call */
+   if ( old_size == 0 )
+   {
+      old_size = new_size;
+      return;
+   }
+
+   if ( old_size == new_size ) {
+     pushp = false;
+   } else if ( old_size < new_size ) {
+     pushp = true;
+   } else if ( old_size > new_size ) {
+     printf( "notify_list_pushed: old size should not be larger\n" );
+   }
+   old_size = new_size;
+      
+   if (ap)
+     [ap mainMenuPushPop: pushp];
+}
+
+static void ui_companion_cocoatouch_notify_refresh(void *data)
+{
+   RetroArch_iOS *ap   = (RetroArch_iOS *)apple_platform;
+
+   if (ap)
+     [ap mainMenuRefresh];
+}
+
+static void ui_companion_cocoatouch_render_messagebox(const char *msg)
+{
+   RetroArch_iOS *ap   = (RetroArch_iOS *)apple_platform;
+
+   if (ap && strcmp(msg, msg_old))
+   {
+      [ap mainMenuRenderMessageBox: [NSString stringWithUTF8String:msg]];
+      strlcpy(msg_old, msg, sizeof(msg_old));
+   }
+}
+
+static void ui_companion_cocoatouch_msg_queue_push(const char *msg,
+   unsigned priority, unsigned duration, bool flush)
+{
+   RetroArch_iOS *ap   = (RetroArch_iOS *)apple_platform;
+
+   if (ap && msg)
+   {
+      [ap.mainmenu msgQueuePush: [NSString stringWithUTF8String:msg]];
+   }
 }
 
 const ui_companion_driver_t ui_companion_cocoatouch = {
@@ -516,5 +578,9 @@ const ui_companion_driver_t ui_companion_cocoatouch = {
    ui_companion_cocoatouch_toggle,
    ui_companion_cocoatouch_event_command,
    ui_companion_cocoatouch_notify_content_loaded,
+   ui_companion_cocoatouch_notify_list_pushed,
+   ui_companion_cocoatouch_notify_refresh,
+   ui_companion_cocoatouch_msg_queue_push,
+   ui_companion_cocoatouch_render_messagebox,
    "cocoatouch",
 };

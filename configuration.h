@@ -14,11 +14,14 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef __RARCH_SETTINGS_H__
-#define __RARCH_SETTINGS_H__
+#ifndef __RARCH_CONFIGURATION_H__
+#define __RARCH_CONFIGURATION_H__
 
 #include <stdint.h>
-#include <retro_miscellaneous.h>
+
+#include <boolean.h>
+
+#include "gfx/video_driver.h"
 #include "driver.h"
 
 #ifndef MAX_USERS
@@ -33,7 +36,12 @@ extern "C" {
 
 typedef struct settings
 {
-   struct 
+   video_viewport_t video_viewport_custom;
+
+   char playlist_names[PATH_MAX_LENGTH];
+   char playlist_cores[PATH_MAX_LENGTH];
+
+   struct
    {
       char driver[32];
       char context_driver[32];
@@ -105,12 +113,14 @@ typedef struct settings
    } ui;
 
 #ifdef HAVE_MENU
-   struct 
+   struct
    {
       char driver[32];
       bool pause_libretro;
       bool timedate_enable;
       bool core_enable;
+      bool dynamic_wallpaper_enable;
+      bool boxart_enable;
       bool throttle;
       char wallpaper[PATH_MAX_LENGTH];
 
@@ -128,8 +138,8 @@ typedef struct settings
       {
          struct
          {
-            bool horizontal_enable;
-            bool vertical_enable;
+            bool enable;
+            bool setting_enable;
          } wraparound;
          struct
          {
@@ -139,16 +149,23 @@ typedef struct settings
             } filter;
          } browser;
       } navigation;
-      bool collapse_subgroups_enable;
+
+      struct
+      {
+         bool     override_enable;
+         unsigned override_value;
+      } dpi;
+
       bool show_advanced_settings;
-#ifdef HAVE_THREADS
-      bool threaded_data_runloop_enable;
-#endif
 
       unsigned entry_normal_color;
       unsigned entry_hover_color;
       unsigned title_color;
    } menu;
+#endif
+
+#ifdef HAVE_THREADS
+   bool threaded_data_runloop_enable;
 #endif
 
    struct
@@ -204,6 +221,8 @@ typedef struct settings
       /* Set by autoconfiguration in joypad_autoconfig_dir.
        * Does not override main binds. */
       bool autoconfigured[MAX_USERS];
+      int vid[MAX_USERS];
+      int pid[MAX_USERS];
 
       unsigned libretro_device[MAX_USERS];
       unsigned analog_dpad_mode[MAX_USERS];
@@ -213,6 +232,7 @@ typedef struct settings
       unsigned joypad_map[MAX_USERS];
       unsigned device[MAX_USERS];
       char device_names[MAX_USERS][64];
+      unsigned device_name_index[MAX_USERS];
       bool autodetect_enable;
       bool netplay_client_swap_input;
 
@@ -220,16 +240,26 @@ typedef struct settings
       unsigned turbo_duty_cycle;
 
       bool overlay_enable;
+      bool overlay_enable_autopreferred;
+      bool overlay_hide_in_menu;
       char overlay[PATH_MAX_LENGTH];
       float overlay_opacity;
       float overlay_scale;
 
       char autoconfig_dir[PATH_MAX_LENGTH];
-      bool autoconfig_descriptor_label_show;
       bool input_descriptor_label_show;
       bool input_descriptor_hide_unbound;
 
       char remapping_path[PATH_MAX_LENGTH];
+      
+      unsigned menu_toggle_gamepad_combo;
+      bool back_as_menu_toggle_enable;
+
+#if TARGET_OS_IPHONE
+      bool small_keyboard_enable;
+#endif
+      bool keyboard_gamepad_enable;
+      unsigned keyboard_gamepad_mapping_type;
    } input;
 
    struct
@@ -252,7 +282,35 @@ typedef struct settings
       bool buildbot_auto_extract_archive;
    } network;
 
+   struct
+   {
+      bool set_supports_no_game_enable;
+   } core;
+
+   struct
+   {
+      bool builtin_mediaplayer_enable;
+      bool builtin_imageviewer_enable;
+   } multimedia;
+
+#ifdef HAVE_CHEEVOS
+   struct
+   {
+      bool enable;
+      bool test_unofficial;
+      char username[32];
+      char password[32];
+   } cheevos;
+#endif
+
    int state_slot;
+
+   bool bundle_assets_extract_enable;
+   unsigned bundle_assets_extract_version_current;
+   unsigned bundle_assets_extract_last_version;
+   char bundle_assets_src_path[PATH_MAX_LENGTH];
+   char bundle_assets_dst_path[PATH_MAX_LENGTH];
+   char bundle_assets_dst_path_subdir[PATH_MAX_LENGTH];
 
    char core_options_path[PATH_MAX_LENGTH];
    char content_history_path[PATH_MAX_LENGTH];
@@ -269,11 +327,12 @@ typedef struct settings
    char cheat_settings_path[PATH_MAX_LENGTH];
    char input_remapping_directory[PATH_MAX_LENGTH];
 
+   char overlay_directory[PATH_MAX_LENGTH];
    char resampler_directory[PATH_MAX_LENGTH];
    char screenshot_directory[PATH_MAX_LENGTH];
    char system_directory[PATH_MAX_LENGTH];
 
-   char extraction_directory[PATH_MAX_LENGTH];
+   char cache_directory[PATH_MAX_LENGTH];
    char playlist_directory[PATH_MAX_LENGTH];
 
    bool history_list_enable;
@@ -283,7 +342,6 @@ typedef struct settings
 
    float slowmotion_ratio;
    float fastforward_ratio;
-   bool fastforward_ratio_throttle_enable;
 
    bool pause_nonactive;
    unsigned autosave_interval;
@@ -294,11 +352,17 @@ typedef struct settings
    bool savestate_auto_load;
 
    bool network_cmd_enable;
-   uint16_t network_cmd_port;
+   unsigned network_cmd_port;
    bool stdin_cmd_enable;
+   bool network_remote_enable;
+   bool network_remote_enable_user[MAX_USERS];
+   unsigned network_remote_base_port;
+   bool debug_panel_enable;
 
    char core_assets_directory[PATH_MAX_LENGTH];
    char assets_directory[PATH_MAX_LENGTH];
+   char dynamic_wallpapers_directory[PATH_MAX_LENGTH];
+   char boxarts_directory[PATH_MAX_LENGTH];
    char menu_config_directory[PATH_MAX_LENGTH];
 #if defined(HAVE_MENU)
    char menu_content_directory[PATH_MAX_LENGTH];
@@ -308,8 +372,20 @@ typedef struct settings
    bool load_dummy_on_core_shutdown;
 
    bool core_specific_config;
+   bool game_specific_options;
    bool auto_overrides_enable;
    bool auto_remaps_enable;
+
+   bool sort_savefiles_enable;
+   bool sort_savestates_enable;
+
+   unsigned menu_ok_btn;
+   unsigned menu_cancel_btn;
+   unsigned menu_search_btn;
+   unsigned menu_default_btn;
+   unsigned menu_info_btn;
+   unsigned menu_scroll_down_btn;
+   unsigned menu_scroll_up_btn;
 
    char username[32];
    unsigned int user_language;
@@ -453,6 +529,14 @@ bool config_load_remap(void);
 bool config_save_keybinds_file(const char *path);
 
 /**
+ * config_save_autoconf_profile:
+ * @path            : Path that shall be written to.
+ * @user              : Controller number to save
+ * Writes a controller autoconf file to disk.
+ **/
+bool config_save_autoconf_profile(const char *path, unsigned user);
+
+/**
  * config_save_file:
  * @path            : Path that shall be written to.
  *
@@ -462,7 +546,7 @@ bool config_save_keybinds_file(const char *path);
  **/
 bool config_save_file(const char *path);
 
-settings_t *config_init(void);
+bool config_realloc(void);
 
 void config_free(void);
 

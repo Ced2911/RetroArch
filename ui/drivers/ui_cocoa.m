@@ -26,9 +26,14 @@
 #include "cocoa/cocoa_common.h"
 #include "../ui_companion_driver.h"
 #include "../../input/drivers/cocoa_input.h"
+#include "../../input/drivers_keyboard/keyboard_event_apple.h"
 #include "../../frontend/frontend.h"
+#include "../../runloop.h"
+#include "../../system.h"
 
 static id apple_platform;
+
+void *get_chosen_screen(void);
 
 void apple_rarch_exited(void)
 {
@@ -44,15 +49,10 @@ void apple_rarch_exited(void)
 {
    NSEventType event_type;
    cocoa_input_data_t *apple = NULL;
-   driver_t *driver = driver_get_ptr();
    [super sendEvent:event];
 
-   apple = (cocoa_input_data_t*)driver->input_data;
    event_type = event.type;
    
-   if (!apple)
-      return;
-
    switch ((int32_t)event_type)
    {
       case NSKeyDown:
@@ -81,11 +81,11 @@ void apple_rarch_exited(void)
                mod |=  RETROKMOD_NUMLOCK;
             
             for (i = 1; i < ch.length; i++)
-               cocoa_input_keyboard_event(event_type == NSKeyDown,
+               apple_input_keyboard_event(event_type == NSKeyDown,
                      0, [ch characterAtIndex:i], mod, RETRO_DEVICE_KEYBOARD);
          }
          
-         cocoa_input_keyboard_event(event_type == NSKeyDown,
+         apple_input_keyboard_event(event_type == NSKeyDown,
                event.keyCode, character, mod, RETRO_DEVICE_KEYBOARD);
       }
          break;
@@ -96,7 +96,7 @@ void apple_rarch_exited(void)
          bool down = (new_flags & old_flags) == old_flags;
          old_flags = new_flags;
 
-         cocoa_input_keyboard_event(down, event.keyCode,
+         apple_input_keyboard_event(down, event.keyCode,
                0, event.modifierFlags, RETRO_DEVICE_KEYBOARD);
       }
          break;
@@ -104,17 +104,41 @@ void apple_rarch_exited(void)
       case NSLeftMouseDragged:
       case NSRightMouseDragged:
       case NSOtherMouseDragged:
-      {
-         NSPoint pos;
-         /* Relative */
-         apple->mouse_x = event.deltaX;
-         apple->mouse_y = event.deltaY;
+         {
+            NSPoint pos;
+            NSPoint mouse_pos;
 
-         /* Absolute */
-         pos = [[CocoaView get] convertPoint:[event locationInWindow] fromView:nil];
-         apple->touches[0].screen_x = pos.x;
-         apple->touches[0].screen_y = pos.y;
-      }
+            apple = (cocoa_input_data_t*)input_driver_get_data();
+            if (!apple)
+               return;
+
+            /* Relative */
+            apple->mouse_rel_x = event.deltaX;
+            apple->mouse_rel_y = event.deltaY;
+
+#if MAC_OS_X_VERSION_10_7
+            NSScreen *screen = (NSScreen*)get_chosen_screen();
+            CGFloat backing_scale_factor = screen.backingScaleFactor;
+#else
+            CGFloat backing_scale_factor = 1.0f;
+#endif
+
+            /* Absolute */
+            pos = [[CocoaView get] convertPoint:[event locationInWindow] fromView:nil];
+            apple->touches[0].screen_x = pos.x * backing_scale_factor;
+            apple->touches[0].screen_y = pos.y * backing_scale_factor;
+
+            //window is a variable containing your window
+            //mouse_pos = [self.window mouseLocationOutsideOfEventStream];
+            //convert to screen coordinates
+            //mouse_pos = [[self.window convertBaseToScreen:mouse_pos];
+
+            //mouse_pos = [event locationInWindow];
+            //mouse_pos = [[CocoaView get] convertPoint:[event locationInWindow] fromView:[CocoaView get] ];
+            mouse_pos = [[CocoaView get] convertPoint:[event locationInWindow]  fromView:nil];
+            apple->window_pos_x = (int16_t)mouse_pos.x * backing_scale_factor;
+            apple->window_pos_y = (int16_t)mouse_pos.y * backing_scale_factor;
+         }
          break;
        case NSScrollWheel:
            /* TODO/FIXME - properly implement. */
@@ -122,12 +146,18 @@ void apple_rarch_exited(void)
       case NSLeftMouseDown:
       case NSRightMouseDown:
       case NSOtherMouseDown:
+         apple = (cocoa_input_data_t*)input_driver_get_data();
+         if (!apple)
+            return;
          apple->mouse_buttons |= 1 << event.buttonNumber;
          apple->touch_count = 1;
          break;
       case NSLeftMouseUp:
       case NSRightMouseUp:
       case NSOtherMouseUp:
+         apple = (cocoa_input_data_t*)input_driver_get_data();
+         if (!apple)
+            return;
          apple->mouse_buttons &= ~(1 << event.buttonNumber);
          apple->touch_count = 0;
          break;
@@ -139,24 +169,19 @@ void apple_rarch_exited(void)
 static int waiting_argc;
 static char** waiting_argv;
 
-@interface RetroArch_OSX()
-@property (nonatomic, retain) NSWindowController* settingsWindow;
-@end
-
 @implementation RetroArch_OSX
 
 @synthesize window = _window;
-@synthesize settingsWindow = _settingsWindow;
 
 - (void)dealloc
 {
    [_window release];
-   [_settingsWindow release];
    [super dealloc];
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification
 {
+   unsigned i;
    apple_platform = self;
    
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 1070
@@ -170,8 +195,15 @@ static char** waiting_argv;
    [[self.window contentView] addSubview:[CocoaView get]];
    [self.window makeFirstResponder:[CocoaView get]];
 
-   self.settingsWindow = [[[NSWindowController alloc] initWithWindowNibName:BOXSTRING("Settings")] autorelease];
-   
+    for (i = 0; i < waiting_argc; i++)
+    {
+        if (!strcmp(waiting_argv[i], "-NSDocumentRevisionsDebugMode"))
+        {
+            waiting_argv[i]   = NULL;
+            waiting_argv[i+1] = NULL;
+            waiting_argc -= 2;
+        }
+    }
    if (rarch_main(waiting_argc, waiting_argv, NULL))
       apple_rarch_exited();
 
@@ -181,14 +213,6 @@ static char** waiting_argv;
 static void poll_iteration(void)
 {
     NSEvent *event = NULL;
-    driver_t *driver = driver_get_ptr();
-    cocoa_input_data_t *apple = (cocoa_input_data_t*)driver->input_data;
-
-    if (!apple)
-      return;
-
-    apple->mouse_x = 0;
-    apple->mouse_y = 0;
     
     do
     {
@@ -203,31 +227,25 @@ static void poll_iteration(void)
     int ret = 0;
     while (ret != -1)
     {
-        poll_iteration();
-        ret = rarch_main_iterate();
-        while(CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.002, FALSE) == kCFRunLoopRunHandledSource);
+       unsigned sleep_ms = 0;
+       poll_iteration();
+       ret = runloop_iterate(&sleep_ms);
+       if (ret == 1 && sleep_ms > 0)
+          retro_sleep(sleep_ms);
+       runloop_data_iterate();
+       while(CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.002, FALSE) == kCFRunLoopRunHandledSource);
     }
     
     main_exit(NULL);
 }
 
-- (void) apple_start_iteration
-{
-    [self performSelectorOnMainThread:@selector(rarch_main) withObject:nil waitUntilDone:NO];
-}
-
-- (void) apple_stop_iteration
-{
-}
-
 - (void)applicationDidBecomeActive:(NSNotification *)notification
 {
-   [self apple_start_iteration];
+   [self performSelectorOnMainThread:@selector(rarch_main) withObject:nil waitUntilDone:NO];
 }
 
 - (void)applicationWillResignActive:(NSNotification *)notification
 {
-   [self apple_stop_iteration];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)theApplication
@@ -240,7 +258,7 @@ static void poll_iteration(void)
    NSApplicationTerminateReply reply = NSTerminateNow;
    global_t *global = global_get_ptr();
 
-   if (global && global->main_is_init)
+   if (global && global->inited.main)
       reply = NSTerminateCancel;
 
    ui_companion_event_command(EVENT_CMD_QUIT);
@@ -249,16 +267,16 @@ static void poll_iteration(void)
 }
 
 
+extern void action_ok_push_quick_menu(void);
+
 - (void)application:(NSApplication *)sender openFiles:(NSArray *)filenames
 {
    if (filenames.count == 1 && [filenames objectAtIndex:0])
    {
-      global_t *global = global_get_ptr();
       NSString *__core = [filenames objectAtIndex:0];
-      const char *core_name = global ? global->menu.info.library_name : NULL;
+      const char *core_name = g_system_menu.library_name;
 		
-		if (global)
-         strlcpy(global->fullpath, __core.UTF8String, sizeof(global->fullpath));
+      runloop_ctl(RUNLOOP_CTL_SET_CONTENT_PATH, (void*)__core.UTF8String);
 
       if (core_name)
          ui_companion_event_command(EVENT_CMD_LOAD_CONTENT);
@@ -272,6 +290,41 @@ static void poll_iteration(void)
    }
 }
 
+- (IBAction)openCore:(id)sender {
+    NSOpenPanel* panel = (NSOpenPanel*)[NSOpenPanel openPanel];
+#if defined(MAC_OS_X_VERSION_10_6)
+    [panel beginSheetModalForWindow:self.window completionHandler:^(NSInteger result)
+     {
+         [[NSApplication sharedApplication] stopModal];
+         
+         if (result == NSOKButton && panel.URL)
+         {
+             settings_t *settings = config_get_ptr();
+             NSURL *url = (NSURL*)panel.URL;
+             NSString *__core = url.path;
+             
+             if (__core)
+             {
+                runloop_ctl(RUNLOOP_CTL_SET_LIBRETRO_PATH, (void*)__core.UTF8String);
+                ui_companion_event_command(EVENT_CMD_LOAD_CORE);
+
+                if (menu_driver_ctl(RARCH_MENU_CTL_HAS_LOAD_NO_CONTENT, NULL) && settings->core.set_supports_no_game_enable)
+                {
+                   int ret = 0;
+                   runloop_ctl(RUNLOOP_CTL_CLEAR_CONTENT_PATH, NULL);
+                   ret = menu_common_load_content(NULL, NULL, false, CORE_TYPE_PLAIN);
+                   if (ret == -1)
+                      action_ok_push_quick_menu();
+                }
+             }
+         }
+     }];
+#else
+    [panel beginSheetForDirectory:nil file:nil modalForWindopw:[self window] modalDelegate:self didEndSelector:@selector(didEndSaveSheet:returnCode:contextInfo:) contextInfo:NULL];
+#endif
+    [[NSApplication sharedApplication] runModalForWindow:panel];
+}
+
 - (void)openDocument:(id)sender
 {
    NSOpenPanel* panel = (NSOpenPanel*)[NSOpenPanel openPanel];
@@ -282,18 +335,14 @@ static void poll_iteration(void)
 
       if (result == NSOKButton && panel.URL)
       {
-         global_t *global = global_get_ptr();
          NSURL *url = (NSURL*)panel.URL;
          NSString *__core = url.path;
-         const char *core_name = global ? global->menu.info.library_name : NULL;
+         const char *core_name = g_system_menu.library_name;
 			
-			if (global)
-            strlcpy(global->fullpath, __core.UTF8String, sizeof(global->fullpath));
+         runloop_ctl(RUNLOOP_CTL_SET_CONTENT_PATH, (void*)__core.UTF8String);
 
          if (core_name)
             ui_companion_event_command(EVENT_CMD_LOAD_CONTENT);
-         else
-            [self performSelector:@selector(chooseCore) withObject:nil afterDelay:.5f];
       }
    }];
 #else
@@ -314,17 +363,13 @@ static void poll_iteration(void)
 
 - (IBAction)showPreferences:(id)sender
 {
-   [NSApp runModalForWindow:[self.settingsWindow window]];
 }
 
 - (IBAction)basicEvent:(id)sender
 {
    enum event_command cmd;
    unsigned sender_tag = (unsigned)[sender tag];
-   global_t *global = global_get_ptr();
    
-   RARCH_LOG("Gets here, sender tag is: %d\n", sender_tag);
-
    switch (sender_tag)
    {
       case 1:
@@ -365,7 +410,7 @@ static void poll_iteration(void)
    if (sender_tag >= 10 && sender_tag <= 19)
    {
       unsigned idx = (sender_tag - (10-1));
-      global->pending.windowed_scale = idx;
+      runloop_ctl(RUNLOOP_CTL_SET_WINDOWED_SCALE, &idx);
       cmd = EVENT_CMD_RESIZE_WINDOWED_SCALE;
    }
 
@@ -381,17 +426,8 @@ static void poll_iteration(void)
 
 int main(int argc, char *argv[])
 {
-   int i;
-   for (i = 0; i < argc; i ++)
-   {
-      if (strcmp(argv[i], "--") == 0)
-      {
-         waiting_argc = argc - i;
-         waiting_argv = argv + i;
-         break;
-      }
-   }
-
+   waiting_argc = argc;
+   waiting_argv = argv;
    return NSApplicationMain(argc, (const char **) argv);
 }
 
@@ -457,6 +493,14 @@ static void ui_companion_cocoa_event_command(void *data, enum event_command cmd)
    event_command(cmd);
 }
 
+static void ui_companion_cocoa_notify_list_pushed(void *data,
+    file_list_t *list, file_list_t *menu_list)
+{
+    (void)data;
+    (void)list;
+    (void)menu_list;
+}
+
 const ui_companion_driver_t ui_companion_cocoa = {
    ui_companion_cocoa_init,
    ui_companion_cocoa_deinit,
@@ -464,5 +508,9 @@ const ui_companion_driver_t ui_companion_cocoa = {
    ui_companion_cocoa_toggle,
    ui_companion_cocoa_event_command,
    ui_companion_cocoa_notify_content_loaded,
+   ui_companion_cocoa_notify_list_pushed,
+   NULL,
+   NULL,
+   NULL,
    "cocoa",
 };

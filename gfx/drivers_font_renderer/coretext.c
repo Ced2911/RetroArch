@@ -13,11 +13,9 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../font_renderer_driver.h"
-#include "../../general.h"
-#include <string.h>
-#include <stddef.h>
 #include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
 
 #include <CoreFoundation/CFString.h>
 #ifdef IOS
@@ -27,7 +25,10 @@
 #include <ApplicationServices/ApplicationServices.h>
 #endif
 
-#define CT_ATLAS_ROWS 8
+#include "../font_driver.h"
+#include "../../general.h"
+
+#define CT_ATLAS_ROWS 16
 #define CT_ATLAS_COLS 16
 #define CT_ATLAS_SIZE (CT_ATLAS_ROWS * CT_ATLAS_COLS)
 
@@ -77,13 +78,13 @@ static bool font_renderer_create_atlas(CTFontRef face, ct_font_renderer_t *handl
    CGSize advances[CT_ATLAS_SIZE];
    float ascent, descent;
    CGContextRef offscreen;
-   CFStringRef keys[] = { kCTFontAttributeName };
    CFDictionaryRef attr;
    void *bitmapData = NULL;
    bool ret = true;
    size_t bitsPerComponent = 8;
    UniChar characters[CT_ATLAS_SIZE] = {0};
    CFTypeRef values[] = { face };
+   CFStringRef keys[] = { kCTFontAttributeName };
 
    for (i = 0; i < CT_ATLAS_SIZE; i++)
       characters[i] = (UniChar)i;
@@ -293,4 +294,5 @@ font_renderer_driver_t coretext_font_renderer = {
   font_renderer_ct_free,
   font_renderer_ct_get_default_font,
   "coretext",
+  NULL, /*get_line_height*/
 };
