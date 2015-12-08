@@ -35,8 +35,6 @@
 #include "../font_driver.h"
 #include "../video_common.h"
 #include "../video_context_driver.h"
-#include "../video_shader_driver.h"
-#include "../video_shader_parse.h"
 
 #if (!defined(HAVE_OPENGLES) || defined(HAVE_OPENGLES3))
 #ifdef GL_PIXEL_PACK_BUFFER
@@ -174,13 +172,8 @@
 #endif
 #endif
 
-struct gl_font_renderer;
-
 typedef struct gl
 {
-   uint64_t frame_count;
-   const shader_backend_t *shader;
-
    bool vsync;
    GLuint texture[GFX_MAX_TEXTURES];
    unsigned tex_index; /* For use with PREV. */
@@ -295,15 +288,6 @@ typedef struct gl
    bool core_context;
    GLuint vao;
 } gl_t;
-
-static INLINE void context_bind_hw_render(gl_t *gl, bool enable)
-{
-   if (!gl)
-      return;
-
-   if (gl->shared_context_use)
-      gfx_ctx_bind_hw_render(gl, enable);
-}
 
 static INLINE bool gl_check_error(void)
 {
